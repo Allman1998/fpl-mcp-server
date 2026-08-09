@@ -1,6 +1,9 @@
-import httpx
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+import httpx
+
 from .models import Player, TransferPayload, BootstrapData
 
 if TYPE_CHECKING:
@@ -12,10 +15,8 @@ class FPLClient:
     BASE_URL = "https://fantasy.premierleague.com/api/"
     
     def __init__(self, store: Optional['SessionStore'] = None):
-        self.session = httpx.AsyncClient(
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=30.0
-        )
+        self.session: httpx.AsyncClient | None = None
+        self._session_loop: asyncio.AbstractEventLoop | None = None
         self.api_token = None
         self.team_id: Optional[int] = None
         self.user_info: Optional[Dict[str, Any]] = None  # Store user info from /me
@@ -25,18 +26,33 @@ class FPLClient:
         if not token.startswith("Bearer "):
             token = f"Bearer {token}"
         self.api_token = token
+
+    def _get_session(self) -> httpx.AsyncClient:
+        current_loop = asyncio.get_running_loop()
+        if self.session is not None and self._session_loop is not current_loop:
+            raise RuntimeError(
+                "FPLClient crossed an asyncio event-loop boundary without being closed."
+            )
+        if self.session is None:
+            self.session = httpx.AsyncClient(
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=30.0,
+            )
+            self._session_loop = current_loop
+        return self.session
         
     async def _request(self, method: str, endpoint: str, data: dict = None, params: dict = None) -> Any:
         url = f"{self.BASE_URL}{endpoint}"
+        session = self._get_session()
         headers = {}
         if self.api_token:
             headers['x-api-authorization'] = self.api_token
             headers['Authorization'] = self.api_token
 
         if method == "GET":
-            response = await self.session.get(url, headers=headers, params=params)
+            response = await session.get(url, headers=headers, params=params)
         else:
-            response = await self.session.post(url, json=data, headers=headers)
+            response = await session.post(url, json=data, headers=headers)
         
         response.raise_for_status()
         return response.json()
@@ -242,4 +258,7 @@ class FPLClient:
         return await self._request("POST", "transfers/", payload.model_dump())
         
     async def close(self):
-        await self.session.aclose()
+        if self.session is not None:
+            await self.session.aclose()
+            self.session = None
+            self._session_loop = None

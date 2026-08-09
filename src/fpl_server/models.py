@@ -1,6 +1,8 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
 from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
+
 
 class Player(BaseModel):
     id: int
@@ -452,12 +454,14 @@ class ChipData(BaseModel):
 
 class TransfersData(BaseModel):
     """Transfer information from my-team endpoint"""
-    cost: int  # Points cost for transfers
-    status: str  # "cost" or other status
-    limit: int  # Maximum number of free transfers that can accumulate
-    made: int  # Number of transfers made this gameweek
-    bank: int  # Money in bank (in tenths, divide by 10 for actual value)
-    value: int  # Total squad value (in tenths, divide by 10 for actual value)
+    # Before GW1, FPL returns null for fields that do not apply yet. Keep that
+    # distinction instead of turning "not applicable" into a misleading zero.
+    cost: Optional[int] = None  # Points cost for transfers
+    status: Optional[str] = None  # "cost" or other status
+    limit: Optional[int] = None  # Current free-transfer limit
+    made: Optional[int] = None  # Transfers made this gameweek
+    bank: Optional[int] = None  # Money in bank, in tenths
+    value: Optional[int] = None  # Squad value, in tenths
     
     class Config:
         extra = "allow"

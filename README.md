@@ -107,8 +107,20 @@ cd fpl-mcp-server
 # Install dependencies
 uv sync
 
-# Install Playwright browsers (required for login automation)
+# Install Playwright's managed Chromium (optional when Chrome/Chromium is installed)
 uv run playwright install chromium
+```
+
+Authentication first uses Playwright's matching managed Chromium. If that revision is not present,
+the server automatically falls back to `google-chrome-stable`, `google-chrome`, `chromium` or
+`chromium-browser` from `PATH`. On a graphical desktop the authentication browser runs minimised in
+normal Chrome mode, avoiding the Premier League account service's headless-browser differences. On
+a server without a display it uses headless mode. To select a browser or mode explicitly:
+
+```bash
+FPL_BROWSER_EXECUTABLE=/usr/bin/google-chrome-stable \
+  FPL_BROWSER_HEADLESS=false \
+  FPL_MCP_TRANSPORT=streamable-http PYTHONPATH=src uv run python -m fpl_server.main
 ```
 
 ### 2. Verify Installation (Optional)
@@ -121,11 +133,49 @@ uv run --env PYTHONPATH=src python -m fpl_server.main
 
 You should see:
 ```text
-Starting FPL Web Auth on http://localhost:8000
+Starting FPL Web Auth on http://127.0.0.1:8020
 Starting MCP Server (Stdio)...
 ```
 
 Press `Ctrl+C` to stop.
+
+### Local FPLAgent application mode
+
+FPLAgent uses a separately running, localhost-only streamable HTTP transport so its application
+backend can perform the authentication handshake and read a structured manager snapshot:
+
+```bash
+FPL_MCP_TRANSPORT=streamable-http PYTHONPATH=src uv run python -m fpl_server.main
+```
+
+This starts:
+
+- the local login page on `http://127.0.0.1:8020`;
+- the MCP endpoint on `http://127.0.0.1:8021/mcp`; and
+- the application-facing tools `get_auth_status`, `begin_web_login`, `poll_web_login` and
+  `get_manager_snapshot` alongside the existing MCP tools.
+
+`get_manager_snapshot` is a read-only, allowlist-friendly payload: 15 ordered picks, captaincy,
+purchase and current selling price, bank, squad value, free-transfer/cost state and chips. It never
+returns login credentials or OAuth tokens. Restart this MCP process after updating the server so
+FPLAgent receives the current snapshot schema.
+
+Keep the process running while using FPLAgent. Authentication is held in process memory and is lost
+when the server restarts. The HTTP endpoint includes powerful account tools and is intended only for
+localhost development; never expose port 8021 publicly.
+
+The port `8020` web server and port `8021` MCP transport use separate asyncio event loops. Login reads
+`/me` and then closes its web-loop HTTP pool; the stored token and manager metadata are loop-neutral,
+and MCP creates its own HTTP pool lazily for subsequent squad reads.
+
+Open FPLAgent after starting this process. The application checks `get_auth_status`; it silently
+syncs when the current process is already authenticated, otherwise it immediately presents an
+in-app login panel containing a cross-origin page served on port `8020`. There is no second tab or
+preliminary MCP login step. Email and password are submitted to the MCP web service directly rather
+than passing through the FPLAgent React client or application API. The application polls
+`poll_web_login`, accepts the entry ID returned by the authenticated FPL `/me` response, then imports
+`get_manager_snapshot`. Opening `http://127.0.0.1:8020` by itself only shows service status because
+there is no application login request to complete.
 
 ### 3. Connect to Claude Desktop
 

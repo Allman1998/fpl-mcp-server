@@ -1,22 +1,223 @@
+import os
 import uuid
 from datetime import datetime
+
 from mcp.server.fastmcp import FastMCP
-from .state import store
+
 from .models import TransferPayload
 from .rotowire_scraper import RotoWireLineupScraper
+from .state import store
 
 # Define the server
-mcp = FastMCP("FPL Manager")
-BASE_URL = "http://localhost:8000"
+mcp = FastMCP(
+    "FPL Manager",
+    host=os.environ.get("FPL_MCP_HOST", "127.0.0.1"),
+    port=int(os.environ.get("FPL_MCP_PORT", "8021")),
+)
+BASE_URL = os.environ.get("FPL_AUTH_BASE_URL", "http://127.0.0.1:8020")
 
 # Global session tracking - stores the active session after login
 _active_session_id: str | None = None
+
+
+def _optional_int(value: object) -> int | None:
+    """Normalize nullable numeric fields returned by the FPL API."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pick_price_text(pick: dict) -> str:
+    price = _optional_int(pick.get("selling_price"))
+    if price is None:
+        price = _optional_int(pick.get("purchase_price"))
+    return f"£{price / 10:.1f}m" if price is not None else "Price unavailable"
+
+
+def _mapping_contract(value: object) -> dict:
+    """Describe a JSON object without returning any user values."""
+    if not isinstance(value, dict):
+        return {"type": type(value).__name__, "keys": [], "null_fields": []}
+    return {
+        "type": "object",
+        "keys": sorted(str(key) for key in value),
+        "null_fields": sorted(str(key) for key, item in value.items() if item is None),
+        "field_types": {
+            str(key): "null" if item is None else type(item).__name__
+            for key, item in sorted(value.items(), key=lambda row: str(row[0]))
+        },
+    }
+
+
+def _records_contract(value: object) -> dict:
+    """Describe an array of JSON objects without returning record values."""
+    records = value if isinstance(value, list) else []
+    mappings = [record for record in records if isinstance(record, dict)]
+    keys = {str(key) for record in mappings for key in record}
+    null_fields = {
+        str(key)
+        for record in mappings
+        for key, item in record.items()
+        if item is None
+    }
+    return {
+        "type": "array" if isinstance(value, list) else type(value).__name__,
+        "count": len(records),
+        "item_keys": sorted(keys),
+        "nullable_item_fields": sorted(null_fields),
+    }
+
 
 def _get_client():
     """Internal helper to get the active client"""
     if not _active_session_id:
         return None
     return store.get_client(_active_session_id)
+
+
+@mcp.tool()
+async def begin_web_login() -> dict:
+    """Start the local browser login flow and return a structured URL for an app client."""
+    request_id = str(uuid.uuid4())
+    store.create_login_request(request_id)
+    return {
+        "status": "pending",
+        "request_id": request_id,
+        "login_url": f"{BASE_URL}/login/{request_id}",
+    }
+
+
+@mcp.tool()
+async def poll_web_login(request_id: str) -> dict:
+    """Poll a structured browser-login request and activate the authenticated session."""
+    global _active_session_id
+    request = store.pending_logins.get(request_id)
+    if not request:
+        return {"status": "failed", "error": "invalid_request_id"}
+    if request.status == "pending":
+        return {"status": "pending", "request_id": request_id}
+    if request.status == "failed":
+        return {"status": "failed", "error": request.error or "login_failed"}
+    _active_session_id = request.session_id
+    client = _get_client()
+    player = (client.user_info or {}).get("player", {}) if client else {}
+    return {
+        "status": "connected",
+        "request_id": request_id,
+        "entry_id": player.get("entry"),
+        "first_name": player.get("first_name"),
+        "last_name": player.get("last_name"),
+    }
+
+
+@mcp.tool()
+async def get_auth_status() -> dict:
+    """Return lightweight local authentication state without making an FPL request."""
+    client = _get_client()
+    if not client:
+        return {"status": "not_authenticated", "entry_id": None}
+    player = (client.user_info or {}).get("player", {})
+    return {
+        "status": "connected",
+        "entry_id": player.get("entry"),
+        "first_name": player.get("first_name"),
+        "last_name": player.get("last_name"),
+    }
+
+
+@mcp.tool()
+async def get_authenticated_schema_diagnostics() -> dict:
+    """Return redacted schemas for authenticated FPL endpoints, never their values."""
+    client = _get_client()
+    if not client:
+        return {"status": "not_authenticated"}
+    entry_id = store.get_user_entry_id(client)
+    if not entry_id:
+        return {"status": "entry_unavailable"}
+
+    me = client.user_info or await client.get_me()
+    my_team = await client.get_my_team(entry_id)
+    transfers = my_team.get("transfers") if isinstance(my_team, dict) else None
+    return {
+        "status": "connected",
+        "redacted": True,
+        "endpoints": {
+            "/api/me/": {
+                "response": _mapping_contract(me),
+                "player": _mapping_contract(me.get("player") if isinstance(me, dict) else None),
+            },
+            "/api/my-team/{entry_id}/": {
+                "response": _mapping_contract(my_team),
+                "picks": _records_contract(
+                    my_team.get("picks") if isinstance(my_team, dict) else None
+                ),
+                "transfers": _mapping_contract(transfers),
+                "chips": _records_contract(
+                    my_team.get("chips") if isinstance(my_team, dict) else None
+                ),
+            },
+        },
+    }
+
+
+@mcp.tool()
+async def get_manager_snapshot() -> dict:
+    """Return the authenticated current squad as structured read-only application data."""
+    client = _get_client()
+    if not client:
+        return {"status": "not_authenticated"}
+    entry_id = store.get_user_entry_id(client)
+    if not entry_id:
+        return {"status": "entry_unavailable"}
+    my_team = await client.get_my_team(entry_id)
+    players = await client.get_players()
+    player_map = {player.id: player for player in players}
+    picks = []
+    for pick in my_team.get("picks") or []:
+        element = _optional_int(pick.get("element"))
+        position = _optional_int(pick.get("position"))
+        if element is None or position is None:
+            continue
+        player = player_map.get(element)
+        purchase_price = _optional_int(pick.get("purchase_price"))
+        selling_price = _optional_int(pick.get("selling_price"))
+        if selling_price is None:
+            selling_price = purchase_price
+        picks.append(
+            {
+                "element": element,
+                "position": position,
+                "is_captain": bool(pick.get("is_captain")),
+                "is_vice_captain": bool(pick.get("is_vice_captain")),
+                "purchase_price": purchase_price,
+                "selling_price": selling_price,
+                "name": player.web_name if player else f"Player {element}",
+                "team": player.team_name if player else "Unknown",
+            }
+        )
+    transfers = my_team.get("transfers") or {}
+    transfer_limit = _optional_int(transfers.get("limit"))
+    transfers_made = _optional_int(transfers.get("made"))
+    free_transfers = (
+        None
+        if transfer_limit is None
+        else max(0, transfer_limit - (transfers_made or 0))
+    )
+    return {
+        "status": "connected",
+        "observed_at": datetime.now().astimezone().isoformat(),
+        "entry_id": int(entry_id),
+        "picks": picks,
+        "bank": _optional_int(transfers.get("bank")),
+        "squad_value": _optional_int(transfers.get("value")),
+        "free_transfers": free_transfers,
+        "transfer_cost": _optional_int(transfers.get("cost")),
+        "chips": my_team.get("chips") or [],
+    }
+
 
 @mcp.tool()
 async def login_to_fpl() -> str:
@@ -116,16 +317,33 @@ async def get_my_squad() -> str:
         p_map = {p.id: p for p in all_players}
         
         # Transfer info
-        transfers = my_team['transfers']
-        bank = transfers['bank'] / 10
-        free_transfers = transfers['limit'] - transfers['made']
-        transfer_cost = transfers['cost']
-        squad_value = transfers['value'] / 10
+        transfers = my_team.get('transfers') or {}
+        bank = _optional_int(transfers.get('bank'))
+        transfer_limit = _optional_int(transfers.get('limit'))
+        transfers_made = _optional_int(transfers.get('made')) or 0
+        free_transfers = (
+            None
+            if transfer_limit is None
+            else max(0, transfer_limit - transfers_made)
+        )
+        transfer_cost = _optional_int(transfers.get('cost'))
+        squad_value = _optional_int(transfers.get('value'))
+
+        squad_value_text = (
+            f"£{squad_value / 10:.1f}m" if squad_value is not None else "Not available"
+        )
+        bank_text = f"£{bank / 10:.1f}m" if bank is not None else "Not available"
+        free_transfers_text = (
+            str(free_transfers) if free_transfers is not None else "Not applicable before GW1"
+        )
+        transfer_cost_text = (
+            f"{transfer_cost} pts" if transfer_cost is not None else "Not applicable"
+        )
         
         output = [
             f"**My Team**",
-            f"Squad Value: £{squad_value:.1f}m | Bank: £{bank:.1f}m",
-            f"Free Transfers: {free_transfers} | Transfer Cost: {transfer_cost} pts",
+            f"Squad Value: {squad_value_text} | Bank: {bank_text}",
+            f"Free Transfers: {free_transfers_text} | Transfer Cost: {transfer_cost_text}",
             ""
         ]
         
@@ -156,13 +374,19 @@ async def get_my_squad() -> str:
         for pick in starting:
             p = p_map.get(pick['element'])
             role = " (C)" if pick['is_captain'] else " (VC)" if pick['is_vice_captain'] else ""
-            output.append(f"{pick['position']:2d}. {p.web_name} ({p.team_name}): £{pick['selling_price']/10:.1f}m{role}")
+            output.append(
+                f"{pick['position']:2d}. {p.web_name} ({p.team_name}): "
+                f"{_pick_price_text(pick)}{role}"
+            )
         
         output.append("\n**Bench:**")
         bench = [p for p in my_team['picks'] if p['position'] > 11]
         for pick in bench:
             p = p_map.get(pick['element'])
-            output.append(f"{pick['position']:2d}. {p.web_name} ({p.team_name}): £{pick['selling_price']/10:.1f}m")
+            output.append(
+                f"{pick['position']:2d}. {p.web_name} ({p.team_name}): "
+                f"{_pick_price_text(pick)}"
+            )
             
         return "\n".join(output)
     except Exception as e:
@@ -2121,10 +2345,21 @@ async def recommend_transfers() -> str:
         
         my_team = await client.get_my_team(entry_id)
         picks = my_team['picks']
-        transfers = my_team['transfers']
-        
-        free_transfers = transfers['limit'] - transfers['made']
-        transfer_cost = transfers['cost']
+        transfers = my_team.get('transfers') or {}
+
+        transfer_limit = _optional_int(transfers.get('limit'))
+        if transfer_limit is None:
+            return (
+                "**Transfer Recommendations**\n\n"
+                "Transfers are not applicable before GW1. Build and refine the initial "
+                "15-player squad instead; transfer advice becomes available once the "
+                "season starts."
+            )
+        free_transfers = max(
+            0,
+            transfer_limit - (_optional_int(transfers.get('made')) or 0),
+        )
+        transfer_cost = _optional_int(transfers.get('cost')) or 0
         
         # Get all players
         all_players = await client.get_players()
@@ -2274,7 +2509,7 @@ async def recommend_transfers() -> str:
                 bench_indicator = " [BENCH]" if pick['position'] > 11 else ""
                 
                 output.extend([
-                    f"**{i}. {player.web_name}** ({player.team_name} {player.position}) £{pick['selling_price']/10:.1f}m{bench_indicator}",
+                    f"**{i}. {player.web_name}** ({player.team_name} {player.position}) {_pick_price_text(pick)}{bench_indicator}",
                     f"├─ Priority Score: {pp['priority_score']} - {', '.join(pp['reasons'])}"
                 ])
                 

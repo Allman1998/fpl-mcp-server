@@ -1,26 +1,115 @@
-import logging
 import asyncio
+import logging
+import os
+import shutil
+from pathlib import Path
 from typing import Optional, List
+
 from playwright.async_api import async_playwright
 
 # Configure logging to see what's happening
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("fpl_auth")
 
+
+def _chromium_launch_options(playwright_executable: str) -> dict[str, str]:
+    """Prefer Playwright's managed browser, then fall back to an installed Chrome."""
+    override = os.environ.get("FPL_BROWSER_EXECUTABLE", "").strip()
+    if override:
+        executable = Path(override).expanduser()
+        if not executable.is_file():
+            raise RuntimeError(
+                f"FPL_BROWSER_EXECUTABLE does not point to a browser: {executable}"
+            )
+        return {"executable_path": str(executable)}
+
+    if Path(playwright_executable).is_file():
+        return {}
+
+    for command in (
+        "google-chrome-stable",
+        "google-chrome",
+        "chromium",
+        "chromium-browser",
+    ):
+        executable = shutil.which(command)
+        if executable:
+            logger.info("Using system browser for FPL authentication: %s", executable)
+            return {"executable_path": executable}
+
+    raise RuntimeError(
+        "No Chromium browser is available for FPL authentication. Run "
+        "`uv run playwright install chromium` in fpl-mcp-server, or set "
+        "FPL_BROWSER_EXECUTABLE to an installed Chrome/Chromium binary."
+    )
+
+
+def _headless_browser_enabled() -> bool:
+    configured = os.environ.get("FPL_BROWSER_HEADLESS", "").strip().lower()
+    if configured:
+        if configured in {"1", "true", "yes", "on"}:
+            return True
+        if configured in {"0", "false", "no", "off"}:
+            return False
+        raise RuntimeError("FPL_BROWSER_HEADLESS must be true or false when set.")
+    return not bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+async def _visible_login_failure(page) -> str | None:
+    known_failures = (
+        (
+            "Invalid username and/or password",
+            "The Premier League rejected the email or password.",
+        ),
+        (
+            "account has been locked",
+            "The Premier League account is temporarily locked.",
+        ),
+        (
+            "too many attempts",
+            "The Premier League temporarily blocked further login attempts.",
+        ),
+    )
+    for page_text, safe_message in known_failures:
+        matches = page.get_by_text(page_text, exact=False)
+        for index in range(await matches.count()):
+            if await matches.nth(index).is_visible():
+                return safe_message
+    return None
+
+
 class FPLAutomation:
     def __init__(self, email: str, password: str):
         self.email = email
         self.password = password
         self.api_token: Optional[str] = None
+        self.failure_reason: str | None = None
         self.base_url = "https://fantasy.premierleague.com"
 
     async def login_and_get_token(self) -> Optional[str]:
         async with async_playwright() as p:
-            # Launch browser (set headless=False if you want to watch it debug)
-            browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+            launch_options = _chromium_launch_options(p.chromium.executable_path)
+            headless = _headless_browser_enabled()
+            browser_args = ["--no-sandbox"]
+            if not headless:
+                browser_args.extend(
+                    [
+                        "--start-minimized",
+                        "--disable-background-timer-throttling",
+                        "--disable-backgrounding-occluded-windows",
+                    ]
+                )
+            logger.info(
+                "Launching the FPL authentication browser in %s mode.",
+                "headless" if headless else "local graphical",
+            )
+            browser = await p.chromium.launch(
+                headless=headless,
+                args=browser_args,
+                **launch_options,
+            )
             context = await browser.new_context(
                 viewport={"width": 1920, "height": 1080},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             )
             page = await context.new_page()
 
@@ -80,6 +169,7 @@ class FPLAutomation:
                 
                 if not login_clicked:
                     logger.error("Could not find any login button")
+                    self.failure_reason = "The current FPL page did not expose its login button."
                     return None
 
                 # CRITICAL FIX: Wait for navigation after clicking login
@@ -96,6 +186,8 @@ class FPLAutomation:
                 # Email
                 email_input = None
                 email_selectors = [
+                    'input[name="username"]',
+                    '#username',
                     'input[name="email"]',
                     'input[type="email"]',
                     'input[placeholder*="email" i]',
@@ -115,6 +207,7 @@ class FPLAutomation:
 
                 if not email_input:
                     logger.error("Failed to find email field")
+                    self.failure_reason = "The current Premier League login page did not expose its email field."
                     # Take screenshot for debugging
                     await page.screenshot(path="email_fail.png")
                     return None
@@ -139,41 +232,58 @@ class FPLAutomation:
 
                 if not pass_input:
                     logger.error("Failed to find password field")
+                    self.failure_reason = "The current Premier League login page did not expose its password field."
                     return None
 
                 # 5. Submit (Try Multiple Buttons)
                 submit_selectors = [
-                    'button[type="submit"]', 
+                    '#btnSignIn',
+                    'button[data-skbuttonvalue="SIGNON"]',
                     'button:has-text("Sign in")',
                     'button:has-text("Log in")',
                     'input[type="submit"]',
-                    '#btnSignIn', 
                     '[data-cy="signin"]',
                     'button[class*="signin"]',
-                    'button[class*="login"]'
+                    'button[class*="login"]',
                 ]
+                submit_clicked = False
                 for sel in submit_selectors:
                     try:
                         btn = await page.wait_for_selector(sel, state="visible", timeout=3000)
                         if btn:
                             await btn.click()
                             logger.info(f"Clicked Submit using {sel}")
+                            submit_clicked = True
                             break
                     except: continue
 
+                if not submit_clicked:
+                    self.failure_reason = "The current Premier League login page did not expose its Sign In action."
+                    return None
+
                 # 6. Wait for Token Capture
                 logger.info("Waiting for token capture...")
-                # We give it up to 15 seconds to finish the API call
-                for _ in range(15):
+                # Observe an explicit, sanitised rejection rather than masking it as a token timeout.
+                for _ in range(30):
                     if self.api_token:
                         return self.api_token
-                    await asyncio.sleep(1)
+                    failure = await _visible_login_failure(page)
+                    if failure:
+                        self.failure_reason = failure
+                        logger.warning("FPL authentication was rejected by the account page.")
+                        return None
+                    await asyncio.sleep(0.5)
                 
                 logger.error("Login flow finished but no token captured.")
+                self.failure_reason = (
+                    "The Premier League login completed without returning an FPL session. "
+                    "Its browser security check may have interrupted the redirect."
+                )
                 return None
 
             except Exception as e:
                 logger.error(f"Auth Critical Error: {e}")
+                self.failure_reason = "The local authentication browser could not complete the FPL login flow."
                 return None
             finally:
                 await browser.close()

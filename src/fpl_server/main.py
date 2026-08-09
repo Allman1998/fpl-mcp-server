@@ -1,3 +1,4 @@
+import os
 import sys
 import traceback
 
@@ -7,12 +8,13 @@ sys.stderr.flush()
 
 try:
     import threading
+
     import uvicorn
-    from .web import app
+
+    from . import mcp_prompts, mcp_resources
     from .mcp_tools import mcp
-    # Import resources and prompts to register them with the MCP server
-    from . import mcp_resources
-    from . import mcp_prompts
+    from .web import app
+
     sys.stderr.write("DEBUG: Imports successful (tools, resources, prompts).\n")
     sys.stderr.flush()
 except Exception as e:
@@ -21,40 +23,44 @@ except Exception as e:
     sys.stderr.flush()
     sys.exit(1)
 
+
 def run_web_server():
     try:
-        sys.stderr.write("DEBUG: Starting Uvicorn on port 8000...\n")
+        auth_port = int(os.environ.get("FPL_AUTH_PORT", "8020"))
+        sys.stderr.write(f"DEBUG: Starting Uvicorn on port {auth_port}...\n")
         sys.stderr.flush()
         # log_level="critical" is even quieter than "error"
-        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="critical")
+        uvicorn.run(app, host="127.0.0.1", port=auth_port, log_level="critical")
     except Exception as e:
         sys.stderr.write(f"WEB SERVER ERROR: {e}\n")
         traceback.print_exc(file=sys.stderr)
         sys.stderr.flush()
 
+
 def main():
     try:
         sys.stderr.write("DEBUG: Starting Web Thread...\n")
         sys.stderr.flush()
-        
+
         # Start FastAPI in a background thread
         t = threading.Thread(target=run_web_server, daemon=True)
         t.start()
-        
-        # Start MCP Server on main thread (Stdio)
-        sys.stderr.write("DEBUG: Starting MCP Server (Stdio)... Waiting for input.\n")
+
+        transport = os.environ.get("FPL_MCP_TRANSPORT", "stdio")
+        sys.stderr.write(f"DEBUG: Starting MCP Server ({transport})... Waiting for input.\n")
         sys.stderr.flush()
-        
+
         # This function blocks and waits for Claude to send JSON
-        mcp.run(transport='stdio')
-        
+        mcp.run(transport=transport)
+
         sys.stderr.write("DEBUG: MCP Server stopped normally.\n")
         sys.stderr.flush()
-        
+
     except Exception as e:
         sys.stderr.write(f"MAIN RUNTIME ERROR: {e}\n")
         traceback.print_exc(file=sys.stderr)
         sys.stderr.flush()
+
 
 if __name__ == "__main__":
     main()

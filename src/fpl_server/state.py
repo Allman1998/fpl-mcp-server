@@ -126,7 +126,7 @@ class SessionStore:
         self.pending_logins[request_id] = PendingLogin(created_at=time.time())
 
     async def set_login_success(self, request_id: str, session_id: str, client: FPLClient):
-        """Set login success and fetch user info from /me endpoint"""
+        """Set login success, retaining only loop-safe client state for MCP use."""
         self.active_sessions[session_id] = client
         
         # Fetch user info after successful login and store it in the client
@@ -137,6 +137,10 @@ class SessionStore:
             logger.info(f"Fetched and stored user info for session {session_id}: entry_id={entry_id}")
         except Exception as e:
             logger.error(f"Failed to fetch user info after login: {e}")
+        finally:
+            # Web authentication and MCP tools run on different event loops. Dispose
+            # the web loop's connection pool; the client lazily creates a new one in MCP.
+            await client.close()
         
         if request_id in self.pending_logins:
             self.pending_logins[request_id].status = "success"

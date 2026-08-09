@@ -6,10 +6,10 @@ They represent GET-like operations without side effects.
 """
 
 from datetime import datetime
-from .state import store
-from .mcp_tools import mcp, _get_client
-from .rotowire_scraper import RotoWireLineupScraper
 
+from .mcp_tools import _get_client, _optional_int, _pick_price_text, mcp
+from .rotowire_scraper import RotoWireLineupScraper
+from .state import store
 
 # ============================================================================
 # BOOTSTRAP DATA RESOURCES (Static)
@@ -735,16 +735,33 @@ async def get_my_squad_resource() -> str:
         p_map = {p.id: p for p in all_players}
         
         # Transfer info
-        transfers = my_team['transfers']
-        bank = transfers['bank'] / 10
-        free_transfers = transfers['limit'] - transfers['made']
-        transfer_cost = transfers['cost']
-        squad_value = transfers['value'] / 10
+        transfers = my_team.get('transfers') or {}
+        bank = _optional_int(transfers.get('bank'))
+        transfer_limit = _optional_int(transfers.get('limit'))
+        transfers_made = _optional_int(transfers.get('made')) or 0
+        free_transfers = (
+            None
+            if transfer_limit is None
+            else max(0, transfer_limit - transfers_made)
+        )
+        transfer_cost = _optional_int(transfers.get('cost'))
+        squad_value = _optional_int(transfers.get('value'))
+
+        squad_value_text = (
+            f"£{squad_value / 10:.1f}m" if squad_value is not None else "Not available"
+        )
+        bank_text = f"£{bank / 10:.1f}m" if bank is not None else "Not available"
+        free_transfers_text = (
+            str(free_transfers) if free_transfers is not None else "Not applicable before GW1"
+        )
+        transfer_cost_text = (
+            f"{transfer_cost} pts" if transfer_cost is not None else "Not applicable"
+        )
         
         output = [
             f"**My Team**",
-            f"Squad Value: £{squad_value:.1f}m | Bank: £{bank:.1f}m",
-            f"Free Transfers: {free_transfers} | Transfer Cost: {transfer_cost} pts",
+            f"Squad Value: {squad_value_text} | Bank: {bank_text}",
+            f"Free Transfers: {free_transfers_text} | Transfer Cost: {transfer_cost_text}",
             ""
         ]
         
@@ -775,13 +792,19 @@ async def get_my_squad_resource() -> str:
         for pick in starting:
             p = p_map.get(pick['element'])
             role = " (C)" if pick['is_captain'] else " (VC)" if pick['is_vice_captain'] else ""
-            output.append(f"{pick['position']:2d}. {p.web_name} ({p.team_name}): £{pick['selling_price']/10:.1f}m{role}")
+            output.append(
+                f"{pick['position']:2d}. {p.web_name} ({p.team_name}): "
+                f"{_pick_price_text(pick)}{role}"
+            )
         
         output.append("\n**Bench:**")
         bench = [p for p in my_team['picks'] if p['position'] > 11]
         for pick in bench:
             p = p_map.get(pick['element'])
-            output.append(f"{pick['position']:2d}. {p.web_name} ({p.team_name}): £{pick['selling_price']/10:.1f}m")
+            output.append(
+                f"{pick['position']:2d}. {p.web_name} ({p.team_name}): "
+                f"{_pick_price_text(pick)}"
+            )
             
         return "\n".join(output)
     except Exception as e:
