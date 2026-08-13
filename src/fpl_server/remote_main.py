@@ -267,31 +267,29 @@ body {
     color: #17211b;
 }
 main {
-    width: min(92%, 440px);
+    width: min(92%, 420px);
     padding: 32px;
     border-radius: 24px;
     background: #f9f9f5;
     box-shadow: 0 25px 70px rgba(0,0,0,.15);
 }
 h1 { margin: 0 0 8px; font-size: 28px; }
-p { color: #68726c; line-height: 1.5; margin: 0 0 16px; }
+p { color: #68726c; line-height: 1.5; }
 label {
     display: block;
-    margin-top: 14px;
+    margin-top: 16px;
     color: #68726c;
     font-size: 13px;
 }
-input, textarea {
+input {
     width: 100%;
     box-sizing: border-box;
     margin-top: 7px;
     padding: 13px;
     border: 1px solid #ccd1ca;
     border-radius: 10px;
-    font-size: 15px;
-    font-family: inherit;
+    font-size: 16px;
 }
-textarea { min-height: 88px; resize: vertical; }
 button {
     width: 100%;
     margin-top: 22px;
@@ -305,88 +303,48 @@ button {
     cursor: pointer;
 }
 .note {
-    margin-top: 14px;
+    margin-top: 16px;
     font-size: 12px;
     color: #68726c;
     line-height: 1.45;
 }
-.steps {
-    background: #eef1ea;
-    border-radius: 12px;
-    padding: 12px 14px;
-    font-size: 13px;
-    color: #3a433d;
-    line-height: 1.45;
-    margin: 12px 0 4px;
-}
-.steps ol { margin: 8px 0 0 18px; padding: 0; }
-.steps li { margin: 4px 0; }
 .error {
     padding: 12px;
     border-radius: 10px;
     background: #f6dfdc;
     color: #8b332c;
-    margin-bottom: 12px;
-}
-details {
-    margin-top: 18px;
-    color: #68726c;
-    font-size: 13px;
-}
-details summary {
-    cursor: pointer;
-    font-weight: 600;
-    color: #17211b;
-}
-code {
-    font-size: 12px;
-    background: #e8ebe4;
-    padding: 1px 4px;
-    border-radius: 4px;
+    margin-bottom: 8px;
 }
 </style>
 </head>
 <body>
 <main>
 <h1>Connect your FPL account</h1>
-<p>Use an access token from a logged-in browser. This is the reliable method on this server.</p>
+<p>
+Sign in with your Fantasy Premier League email and password.
+Your password is used only to authenticate with FPL on this server.
+</p>
 {error}
-<div class="steps">
-<strong>On a laptop (2 minutes)</strong>
-<ol>
-<li>Open <code>fantasy.premierleague.com</code> and log in</li>
-<li>Press <code>F12</code> → <strong>Network</strong> tab</li>
-<li>Refresh or open <strong>My Team</strong></li>
-<li>Click any <code>/api/</code> request</li>
-<li>Copy the <strong>Authorization</strong> header (<code>Bearer …</code>)</li>
-<li>Paste it below and connect</li>
-</ol>
-</div>
 <form method="post">
 <label>
-FPL access token
-<textarea name="token" autocomplete="off" placeholder="Bearer eyJhbGciOi..."></textarea>
+FPL email
+<input type="email" name="email" autocomplete="username" required>
+</label>
+<label>
+FPL password
+<input type="password" name="password" autocomplete="current-password" required>
 </label>
 <button type="submit">Connect FPL account</button>
 </form>
-<details>
-<summary>Alternative: email &amp; password (often fails on this server)</summary>
-<p class="note">Browser automation on the free host is slow and frequently times out. Prefer the token method above.</p>
-<label>FPL email
-<input type="email" name="email" autocomplete="username">
-</label>
-<label>FPL password
-<input type="password" name="password" autocomplete="current-password">
-</label>
-<p class="note">If you use password, leave the token field empty. Submit still uses the same button above — fill either token <em>or</em> email/password.</p>
-</details>
 <div class="note">
-This login is for your FPL Manager MCP connection. The token acts like a temporary session; do not share it publicly.
+After you submit, wait on the next screen — login can take up to a couple of minutes on this host.
+This login is requested by your FPL Manager MCP connection.
 </div>
 </main>
 </body>
 </html>
 """
+
 
 
 
@@ -452,7 +410,7 @@ body{margin:0;min-height:100vh;display:grid;place-items:center;background:#e9ebe
 main{padding:36px;border-radius:24px;background:#f9f9f5;box-shadow:0 25px 70px rgba(0,0,0,.15);text-align:center}
 </style></head><body><main>
 <h1>Signing in to FPL…</h1>
-<p>This can take up to a minute. This page will update automatically.</p>
+<p>This can take 1–3 minutes on this server. Keep this page open — it updates automatically.</p>
 </main></body></html>"""
         )
     if status == "failed":
@@ -555,7 +513,7 @@ async def oauth_login_submit(request):
                 auth = FPLAutomation(email, password)
                 token = await asyncio.wait_for(
                     auth.login_and_get_token(),
-                    timeout=90.0,
+                    timeout=180.0,
                 )
                 if not token:
                     pending.login_status = "failed"
@@ -579,7 +537,7 @@ async def oauth_login_submit(request):
             except asyncio.TimeoutError:
                 pending.login_status = "failed"
                 pending.login_error = (
-                    "FPL login timed out. Please try again."
+                    "FPL login timed out after 3 minutes. The Premier League site may be blocking this server — please try again once, or retry later."
                 )
             except Exception as exc:
                 pending.login_status = "failed"

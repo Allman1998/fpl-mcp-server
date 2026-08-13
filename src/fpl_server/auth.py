@@ -197,7 +197,7 @@ class FPLAutomation:
 
                 for entry in login_entry_urls:
                     logger.info("Navigating to %s", entry)
-                    await page.goto(entry, wait_until="domcontentloaded", timeout=30000)
+                    await page.goto(entry, wait_until="domcontentloaded", timeout=45000)
                     await _accept_cookies()
 
                     # Already on a login form?
@@ -244,7 +244,7 @@ class FPLAutomation:
                     # Try opening login in a new navigation if SPA route exists
                     for path in ("/login", "/sign-in", "/account/login"):
                         try:
-                            await page.goto(self.base_url + path, wait_until="domcontentloaded", timeout=15000)
+                            await page.goto(self.base_url + path, wait_until="domcontentloaded", timeout=20000)
                             await _accept_cookies()
                             email_input, email_sel = await _find_email_input(3000)
                             if email_input:
