@@ -96,7 +96,6 @@ class FPLAutomation:
                 "--disable-gpu",
                 "--disable-extensions",
                 "--disable-background-networking",
-                "--single-process",
             ]
             if not headless:
                 browser_args.extend(
@@ -116,7 +115,16 @@ class FPLAutomation:
                 **launch_options,
             )
             context = await browser.new_context(
-                viewport={"width": 1920, "height": 1080},
+                viewport={"width": 1280, "height": 800},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36"
+                ),
+                locale="en-GB",
+            )
+            await context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
             )
             page = await context.new_page()
 
@@ -134,90 +142,134 @@ class FPLAutomation:
             page.on("response", handle_response)
             
             try:
-                logger.info(f"Navigating to {self.base_url}")
-                await page.goto(self.base_url)
-                await page.wait_for_load_state("domcontentloaded")
-                
-                # 2. Handle Cookie Banner (Robust)
-                try:
-                    cookie_btn = await page.wait_for_selector('#onetrust-accept-btn-handler', timeout=5000)
-                    if cookie_btn:
-                        await cookie_btn.click()
-                        logger.info("Accepted Cookies")
-                        await page.wait_for_timeout(1000)
-                except Exception:
-                    logger.info("No cookie banner found (or already accepted)")
 
-                # 3. Find Login Button (Try Multiple Selectors)
-                logger.info("Looking for Login button...")
-                login_selectors = [
-                    'button:has-text("Log in")',
-                    'a:has-text("Log in")', 
-                    'button:has-text("Sign in")',
-                    'a:has-text("Sign in")',
-                    '[data-cy="login"]',
-                    '.login-button',
-                    'button[class*="login"]',
-                    'a[href*="login"]'
+                login_entry_urls = [
+                    f"{self.base_url}/",
+                    f"{self.base_url}/?login",
+                    "https://fantasy.premierleague.com/",
                 ]
-                
-                login_clicked = False
-                for selector in login_selectors:
-                    try:
-                        # Short timeout for checking each selector
-                        btn = await page.wait_for_selector(selector, state="visible", timeout=2000)
-                        if btn:
-                            await btn.click()
-                            logger.info(f"Clicked login using selector: {selector}")
-                            login_clicked = True
-                            break
-                    except Exception:
-                        continue
-                
-                if not login_clicked:
-                    logger.error("Could not find any login button")
-                    self.failure_reason = "The current FPL page did not expose its login button."
-                    return None
 
-                # CRITICAL FIX: Wait for navigation after clicking login
-                # This matches your working code which waits for networkidle here
-                logger.info("Waiting for login page navigation...")
-                try:
-                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
-                except Exception:
-                    logger.warning("Network idle timeout - continuing anyway...")
-
-                # 4. Fill Credentials (Try Multiple Input Selectors from your working code)
-                logger.info("Looking for email input...")
-                
-                # Email
-                email_input = None
                 email_selectors = [
                     'input[name="username"]',
-                    '#username',
                     'input[name="email"]',
                     'input[type="email"]',
-                    'input[placeholder*="email" i]',
-                    'input[id*="email" i]',
+                    '#username',
                     '#email',
-                    '[data-cy="email"]'
+                    'input[id*="email" i]',
+                    'input[placeholder*="email" i]',
+                    'input[placeholder*="Email" i]',
+                    'input[autocomplete="username"]',
+                    'input[autocomplete="email"]',
+                    '[data-cy="email"]',
+                    'input[type="text"]',
                 ]
-                
-                for sel in email_selectors:
-                    try:
-                        email_input = await page.wait_for_selector(sel, state="visible", timeout=3000)
-                        if email_input:
-                            logger.info(f"Found email input using: {sel}")
-                            await email_input.fill(self.email)
-                            break
-                    except: continue
+
+                async def _accept_cookies():
+                    for sel in (
+                        '#onetrust-accept-btn-handler',
+                        'button:has-text("Accept All Cookies")',
+                        'button:has-text("Accept all")',
+                        'button:has-text("I Accept")',
+                        'button:has-text("Accept")',
+                    ):
+                        try:
+                            btn = await page.wait_for_selector(sel, state="visible", timeout=2000)
+                            if btn:
+                                await btn.click()
+                                await page.wait_for_timeout(500)
+                                logger.info("Accepted cookies via %s", sel)
+                                return
+                        except Exception:
+                            continue
+
+                async def _find_email_input(timeout_ms: int = 4000):
+                    for sel in email_selectors:
+                        try:
+                            el = await page.wait_for_selector(sel, state="visible", timeout=timeout_ms)
+                            if el:
+                                return el, sel
+                        except Exception:
+                            continue
+                    return None, None
+
+                email_input = None
+                email_sel = None
+
+                for entry in login_entry_urls:
+                    logger.info("Navigating to %s", entry)
+                    await page.goto(entry, wait_until="domcontentloaded", timeout=30000)
+                    await _accept_cookies()
+
+                    # Already on a login form?
+                    email_input, email_sel = await _find_email_input(2500)
+                    if email_input:
+                        break
+
+                    # Click Sign in / Log in
+                    login_selectors = [
+                        'a:has-text("Sign In")',
+                        'button:has-text("Sign In")',
+                        'a:has-text("Sign in")',
+                        'button:has-text("Sign in")',
+                        'a:has-text("Log In")',
+                        'button:has-text("Log In")',
+                        'a:has-text("Log in")',
+                        'button:has-text("Log in")',
+                        'a[href*="login"]',
+                        'a[href*="sign-in"]',
+                        'a[href*="signin"]',
+                        '[data-testid*="login"]',
+                        '[data-cy="login"]',
+                    ]
+                    for selector in login_selectors:
+                        try:
+                            btn = await page.wait_for_selector(selector, state="visible", timeout=1500)
+                            if btn:
+                                await btn.click()
+                                logger.info("Clicked login control: %s", selector)
+                                try:
+                                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                                except Exception:
+                                    pass
+                                await page.wait_for_timeout(1500)
+                                await _accept_cookies()
+                                email_input, email_sel = await _find_email_input(5000)
+                                if email_input:
+                                    break
+                        except Exception:
+                            continue
+                    if email_input:
+                        break
+
+                    # Try opening login in a new navigation if SPA route exists
+                    for path in ("/login", "/sign-in", "/account/login"):
+                        try:
+                            await page.goto(self.base_url + path, wait_until="domcontentloaded", timeout=15000)
+                            await _accept_cookies()
+                            email_input, email_sel = await _find_email_input(3000)
+                            if email_input:
+                                break
+                        except Exception:
+                            continue
+                    if email_input:
+                        break
 
                 if not email_input:
-                    logger.error("Failed to find email field")
-                    self.failure_reason = "The current Premier League login page did not expose its email field."
-                    # Take screenshot for debugging
-                    await page.screenshot(path="email_fail.png")
+                    logger.error("Failed to find email field on %s", page.url)
+                    title = await page.title()
+                    self.failure_reason = (
+                        "Could not reach the Premier League login form "
+                        f"(page title: {title!r}). The site may be blocking "
+                        "automated browsers on this server."
+                    )
+                    try:
+                        await page.screenshot(path="email_fail.png")
+                    except Exception:
+                        pass
                     return None
+
+                logger.info("Found email input using: %s on %s", email_sel, page.url)
+                await email_input.fill(self.email)
 
                 # Password
                 pass_input = None
