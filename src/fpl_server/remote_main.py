@@ -357,29 +357,23 @@ Your password is used only to authenticate with FPL.
 <form method="post">
 
 <label>
-
 FPL email
-
-<input
-    type="email"
-    name="email"
-    autocomplete="username"
-    required
->
-
+<input type="email" name="email" autocomplete="username">
 </label>
 
 <label>
-
 FPL password
+<input type="password" name="password" autocomplete="current-password">
+</label>
 
-<input
-    type="password"
-    name="password"
-    autocomplete="current-password"
-    required
->
+<div class="note" style="margin-top:18px">
+Or paste an FPL access token (more reliable on this server).
+Log into fantasy.premierleague.com on your phone/computer, open DevTools → Network, call any API request, and copy the <code>Authorization</code> or <code>x-api-authorization</code> header value (starts with Bearer).
+</div>
 
+<label>
+FPL access token (optional)
+<input type="text" name="token" autocomplete="off" placeholder="Bearer eyJ...">
 </label>
 
 <button type="submit">
@@ -389,8 +383,7 @@ Connect FPL account
 </form>
 
 <div class="note">
-This login is being requested by your FPL Manager
-MCP connection.
+This login is being requested by your FPL Manager MCP connection.
 </div>
 
 </main>
@@ -502,16 +495,64 @@ async def oauth_login_submit(request):
         form = await request.form()
         email = (form.get("email") or "").strip()
         password = form.get("password") or ""
+        token = (form.get("token") or "").strip()
+
+        # Allow retry after a previous failure on the same request_id
+        if getattr(pending, "login_status", None) == "failed":
+            pending.login_status = None
+            pending.login_error = None
+
+        import asyncio
+
+        # Fast path: pasted FPL access token (reliable on Render)
+        if token:
+            async def _run_token_login():
+                try:
+                    if not token.lower().startswith("bearer "):
+                        tok = f"Bearer {token}"
+                    else:
+                        tok = token
+                    session_id = str(uuid.uuid4())
+                    client = FPLClient(store=store)
+                    client.set_api_token(tok)
+                    me = await client.get_me()
+                    if not me:
+                        pending.login_status = "failed"
+                        pending.login_error = (
+                            "Token was rejected by FPL (/api/me failed)."
+                        )
+                        return
+                    client.user_info = me
+                    await store.set_login_success(
+                        request_id, session_id, client
+                    )
+                    mcp_tools._active_session_id = session_id
+                    pending.login_session_id = session_id
+                    pending.login_status = "success"
+                except Exception as exc:
+                    pending.login_status = "failed"
+                    pending.login_error = (
+                        f"Token login failed: {exc}"
+                    )
+
+            pending.login_status = "pending"
+            pending.login_error = None
+            asyncio.create_task(_run_token_login())
+            return RedirectResponse(
+                f"/oauth/login/{request_id}/status",
+                status_code=302,
+            )
+
         if not email or not password:
-            return login_error("Email and password are required.")
+            return login_error(
+                "Provide email + password, or paste an FPL access token."
+            )
 
         # Mark pending login and run Playwright in the background so the
         # HTTP response is not killed by Render's request timeout.
         pending.login_status = "pending"
         pending.login_error = None
         pending.login_redirect = None
-
-        import asyncio
 
         async def _run_login():
             try:
