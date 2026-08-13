@@ -547,24 +547,30 @@ async def lifespan(
 # ============================================================
 # MCP PATH NORMALIZATION
 #
-# External clients call POST /mcp/<secret> (no trailing slash).
-# The FastMCP Streamable HTTP app registers Route("/") which
-# matches the remaining path "/" after a trailing-slash Mount.
-# This ASGI wrapper rewrites the path so both forms work.
+# Clients and OAuth resource URLs use /mcp/<secret> (no trailing
+# slash). FastMCP's Route("/") matches more reliably when the
+# remaining path is "/". This middleware rewrites the exact
+# non-trailing path to the trailing form before routing.
 # ============================================================
 
-async def _mcp_root_asgi(scope, receive, send):
-    """Forward exact /mcp/<secret> (no trailing slash) into the MCP app."""
-    if scope["type"] != "http":
-        await mcp_http_app(scope, receive, send)
-        return
+class NormalizeMcpPathMiddleware:
+    """Rewrite exact /mcp/<secret> -> /mcp/<secret>/ for routing."""
 
-    new_scope = dict(scope)
-    # Present as a root request under the mount so Route("/") matches
-    new_scope["path"] = "/"
-    new_scope["raw_path"] = b"/"
-    new_scope["root_path"] = (scope.get("root_path") or "") + MCP_PUBLIC_PATH
-    await mcp_http_app(new_scope, receive, send)
+    def __init__(self, app):
+        self.app = app
+        self.target = MCP_PUBLIC_PATH
+        self.target_slash = MCP_PUBLIC_PATH + "/"
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            path = scope.get("path") or ""
+            if path == self.target:
+                # Mutate a copy of the scope
+                scope = dict(scope)
+                scope["path"] = self.target_slash
+                if "raw_path" in scope:
+                    scope["raw_path"] = (self.target_slash).encode("utf-8")
+        await self.app(scope, receive, send)
 
 
 # ============================================================
@@ -607,18 +613,7 @@ routes = [
         methods=["POST"],
     ),
 
-    # MCP application.
-    #
-    # FastMCP registers Route("/") for the streamable HTTP handler.
-    # Under Mount("/mcp/<secret>"), both /mcp/<secret> and /mcp/<secret>/
-    # should match, but some ASGI/proxy combinations only hit the trailing
-    # form. We therefore:
-    # 1. Mount the full MCP app (OAuth + MCP) under the trailing-slash path
-    # 2. Explicitly forward the exact non-trailing path into the same app
-    Route(
-        MCP_PUBLIC_PATH,
-        endpoint=_mcp_root_asgi,
-    ),
+    # MCP application (path normalized by NormalizeMcpPathMiddleware)
     Mount(
         MCP_PUBLIC_PATH + "/",
         app=mcp_http_app,
@@ -636,10 +631,13 @@ routes = [
 # STARLETTE APPLICATION
 # ============================================================
 
-app = Starlette(
+_starlette_app = Starlette(
     routes=routes,
     lifespan=lifespan,
 )
+
+# Normalize /mcp/<secret> -> /mcp/<secret>/ so FastMCP Route("/") matches
+app = NormalizeMcpPathMiddleware(_starlette_app)
 
 
 # ============================================================
