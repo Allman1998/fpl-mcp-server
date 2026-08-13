@@ -169,7 +169,7 @@ except (ImportError, AttributeError):
 # IMPORTANT:
 # In MCP 1.28.1 the streamable HTTP route is configured on FastMCP itself.
 # The mounted public URL is /mcp/<secret>, so the inner app must use "/".
-mcp.settings.streamable_http_path = ""  # match Mount without trailing slash (remaining path is empty)
+mcp.settings.streamable_http_path = "/"
 mcp.settings.stateless_http = True
 if transport_security is not None:
     mcp.settings.transport_security = transport_security
@@ -554,20 +554,16 @@ async def lifespan(
 # ============================================================
 
 async def _mcp_root_asgi(scope, receive, send):
-    """Forward exact /mcp/<secret> requests into the MCP app as path=/."""
+    """Forward exact /mcp/<secret> (no trailing slash) into the MCP app."""
     if scope["type"] != "http":
         await mcp_http_app(scope, receive, send)
         return
 
-    # Rewrite so FastMCP's Route("/") matches the non-trailing public URL.
     new_scope = dict(scope)
+    # Present as a root request under the mount so Route("/") matches
     new_scope["path"] = "/"
     new_scope["raw_path"] = b"/"
-    root = (scope.get("root_path") or "") + MCP_PUBLIC_PATH
-    new_scope["root_path"] = root
-    # Ensure path matching inside Starlette sees a root request
-    if "path_info" in new_scope:
-        new_scope["path_info"] = "/"
+    new_scope["root_path"] = (scope.get("root_path") or "") + MCP_PUBLIC_PATH
     await mcp_http_app(new_scope, receive, send)
 
 
@@ -613,12 +609,18 @@ routes = [
 
     # MCP application.
     #
-    # Mount at /mcp/<secret> (no trailing slash). Inner FastMCP uses
-    # streamable_http_path="" so the MCP handler matches the empty remaining
-    # path that Starlette passes for exact /mcp/<secret> requests.
-    # Subpaths (/register, /.well-known/..., /authorize, /token) still match.
-    Mount(
+    # FastMCP registers Route("/") for the streamable HTTP handler.
+    # Under Mount("/mcp/<secret>"), both /mcp/<secret> and /mcp/<secret>/
+    # should match, but some ASGI/proxy combinations only hit the trailing
+    # form. We therefore:
+    # 1. Mount the full MCP app (OAuth + MCP) under the trailing-slash path
+    # 2. Explicitly forward the exact non-trailing path into the same app
+    Route(
         MCP_PUBLIC_PATH,
+        endpoint=_mcp_root_asgi,
+    ),
+    Mount(
+        MCP_PUBLIC_PATH + "/",
         app=mcp_http_app,
     ),
 

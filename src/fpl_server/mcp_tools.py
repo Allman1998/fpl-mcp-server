@@ -38,7 +38,7 @@ mcp = FastMCP(
     "FPL Manager",
     host=os.environ.get("FPL_MCP_HOST", "127.0.0.1"),
     port=int(os.environ.get("FPL_MCP_PORT", "8021")),
-    streamable_http_path="",
+    streamable_http_path="/",
     stateless_http=True,
     token_verifier=ProviderTokenVerifier(oauth_provider),
     auth=AuthSettings(
