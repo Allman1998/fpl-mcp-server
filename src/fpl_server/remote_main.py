@@ -559,12 +559,15 @@ async def _mcp_root_asgi(scope, receive, send):
         await mcp_http_app(scope, receive, send)
         return
 
-    # Copy scope and force path to "/" so Route("/") inside mcp_http_app matches
+    # Rewrite so FastMCP's Route("/") matches the non-trailing public URL.
     new_scope = dict(scope)
     new_scope["path"] = "/"
-    # root_path should reflect the public mount so relative links stay correct
-    root = scope.get("root_path", "") + MCP_PUBLIC_PATH
+    new_scope["raw_path"] = b"/"
+    root = (scope.get("root_path") or "") + MCP_PUBLIC_PATH
     new_scope["root_path"] = root
+    # Ensure path matching inside Starlette sees a root request
+    if "path_info" in new_scope:
+        new_scope["path_info"] = "/"
     await mcp_http_app(new_scope, receive, send)
 
 
@@ -618,14 +621,15 @@ routes = [
     # MCP clients (and OAuth resource identifiers) use the non-trailing
     # form. Serve both by mounting under the trailing-slash path and adding
     # an explicit passthrough Route for the exact non-trailing path.
-    Mount(
-        MCP_PUBLIC_PATH + "/",
-        app=mcp_http_app,
-    ),
-    # Exact non-trailing path -> same MCP ASGI app (path rewritten to /)
+    # Exact non-trailing path first (clients use this form)
     Route(
         MCP_PUBLIC_PATH,
         endpoint=_mcp_root_asgi,
+    ),
+    # Trailing-slash + all subpaths (OAuth routes, well-known, etc.)
+    Mount(
+        MCP_PUBLIC_PATH + "/",
+        app=mcp_http_app,
     ),
 
     # Existing web application
