@@ -96,7 +96,7 @@ async def _launch_browser(playwright):
             resp = await client.post(
                 "https://www.browserbase.com/v1/sessions",
                 headers={
-                    "Authorization": f"Bearer {api_key}",
+                    "X-BB-API-Key": api_key,
                     "Content-Type": "application/json",
                 },
                 json=payload or {},
