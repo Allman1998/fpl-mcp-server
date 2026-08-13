@@ -169,7 +169,7 @@ except (ImportError, AttributeError):
 # IMPORTANT:
 # In MCP 1.28.1 the streamable HTTP route is configured on FastMCP itself.
 # The mounted public URL is /mcp/<secret>, so the inner app must use "/".
-mcp.settings.streamable_http_path = "/"
+mcp.settings.streamable_http_path = ""  # match Mount without trailing slash (remaining path is empty)
 mcp.settings.stateless_http = True
 if transport_security is not None:
     mcp.settings.transport_security = transport_security
@@ -613,22 +613,12 @@ routes = [
 
     # MCP application.
     #
-    # Because mcp_http_app uses streamable_http_path="/",
-    # the mounted URL itself is the MCP endpoint.
-    #
-    # Starlette Mount path matching + Route("/") inside the SDK app only
-    # reliably matches the trailing-slash form of the mount point. External
-    # MCP clients (and OAuth resource identifiers) use the non-trailing
-    # form. Serve both by mounting under the trailing-slash path and adding
-    # an explicit passthrough Route for the exact non-trailing path.
-    # Exact non-trailing path first (clients use this form)
-    Route(
-        MCP_PUBLIC_PATH,
-        endpoint=_mcp_root_asgi,
-    ),
-    # Trailing-slash + all subpaths (OAuth routes, well-known, etc.)
+    # Mount at /mcp/<secret> (no trailing slash). Inner FastMCP uses
+    # streamable_http_path="" so the MCP handler matches the empty remaining
+    # path that Starlette passes for exact /mcp/<secret> requests.
+    # Subpaths (/register, /.well-known/..., /authorize, /token) still match.
     Mount(
-        MCP_PUBLIC_PATH + "/",
+        MCP_PUBLIC_PATH,
         app=mcp_http_app,
     ),
 
