@@ -38,8 +38,8 @@ async def lifespan(_app):
 
 routes = [
     Route("/health", health, methods=["GET"]),
-    *auth_app.routes,
     Mount(f"/mcp/{PATH_SECRET}", app=mcp_http_app),
+    Mount("/", app=auth_app),
 ]
 
 app = Starlette(routes=routes, lifespan=lifespan)
