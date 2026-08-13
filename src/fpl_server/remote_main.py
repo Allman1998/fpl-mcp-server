@@ -24,7 +24,7 @@ except (ImportError, AttributeError):
     pass
 
 mcp.settings.stateless_http = True
-mcp.settings.streamable_http_path = "/"
+mcp.settings.streamable_http_path = "/mcp"
 mcp_http_app = mcp.streamable_http_app()
 
 async def health(_request):
