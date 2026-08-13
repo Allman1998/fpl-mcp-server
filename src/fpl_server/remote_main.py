@@ -21,9 +21,9 @@ from .client import FPLClient
 from .state import store
 
 
-# ---------------------------------------------------------------------------
-# Server configuration
-# ---------------------------------------------------------------------------
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
 PORT = int(os.environ.get("PORT", "10000"))
 
@@ -42,15 +42,23 @@ PUBLIC_BASE_URL = os.environ.get(
 ).rstrip("/")
 
 
-OAUTH_ISSUER = f"{PUBLIC_BASE_URL}/mcp/{PATH_SECRET}"
+MCP_PUBLIC_PATH = f"/mcp/{PATH_SECRET}"
+
+MCP_PUBLIC_URL = (
+    f"{PUBLIC_BASE_URL}{MCP_PUBLIC_PATH}"
+)
+
+OAUTH_ISSUER = MCP_PUBLIC_URL
 
 
-# ---------------------------------------------------------------------------
-# OAuth configuration
-# ---------------------------------------------------------------------------
+# ============================================================
+# MCP AUTH CONFIGURATION
+# ============================================================
 
 mcp._auth_server_provider = oauth_provider
-mcp._token_verifier = ProviderTokenVerifier(oauth_provider)
+mcp._token_verifier = ProviderTokenVerifier(
+    oauth_provider
+)
 
 
 if mcp.settings.auth is not None:
@@ -63,29 +71,28 @@ if mcp.settings.auth is not None:
     )
 
 
-# ---------------------------------------------------------------------------
-# MCP SDK 1.28.1 public-client compatibility
+# ============================================================
+# PUBLIC OAUTH CLIENT COMPATIBILITY
 #
-# MCP SDK 1.28.1 hard-codes:
+# MCP SDK 1.28.1 does not advertise "none" in the OAuth
+# discovery metadata even though public PKCE clients need it.
 #
-#   client_secret_post
-#   client_secret_basic
-#
-# into OAuth discovery metadata.
-#
-# Claude uses a public OAuth client with PKCE and therefore needs:
-#
-#   none
-#
-# The SDK's registration implementation already supports "none".
-# We only correct the discovery metadata before FastMCP builds its routes.
-# ---------------------------------------------------------------------------
+# Claude is a public OAuth client, so advertise "none".
+# ============================================================
 
-_original_build_metadata = mcp_auth_routes.build_metadata
+_original_build_metadata = (
+    mcp_auth_routes.build_metadata
+)
 
 
-def _build_metadata_with_public_client(*args, **kwargs):
-    metadata = _original_build_metadata(*args, **kwargs)
+def _build_metadata_with_public_client(
+    *args,
+    **kwargs,
+):
+    metadata = _original_build_metadata(
+        *args,
+        **kwargs,
+    )
 
     existing_methods = (
         metadata.token_endpoint_auth_methods_supported
@@ -101,18 +108,26 @@ def _build_metadata_with_public_client(*args, **kwargs):
     return metadata
 
 
-mcp_auth_routes.build_metadata = _build_metadata_with_public_client
+mcp_auth_routes.build_metadata = (
+    _build_metadata_with_public_client
+)
 
 
-# ---------------------------------------------------------------------------
-# Existing OAuth login redirect
-# ---------------------------------------------------------------------------
+# ============================================================
+# OAUTH LOGIN REDIRECT
+# ============================================================
 
 _original_authorize = oauth_provider.authorize
 
 
-async def _oauth_authorize(client, params):
-    login_url = await _original_authorize(client, params)
+async def _oauth_authorize(
+    client,
+    params,
+):
+    login_url = await _original_authorize(
+        client,
+        params,
+    )
 
     login_url = login_url.replace(
         f"{PUBLIC_BASE_URL}/login/",
@@ -126,175 +141,245 @@ async def _oauth_authorize(client, params):
 oauth_provider.authorize = _oauth_authorize
 
 
-# ---------------------------------------------------------------------------
-# MCP HTTP configuration
-# ---------------------------------------------------------------------------
+# ============================================================
+# MCP TRANSPORT
+#
+# IMPORTANT:
+# The public URL is mounted at:
+#
+#   /mcp/<secret>
+#
+# Therefore the MCP application itself must use "/" as its
+# internal path.
+# ============================================================
 
 try:
-    from mcp.server.transport_security import TransportSecuritySettings
+    from mcp.server.transport_security import (
+        TransportSecuritySettings,
+    )
 
-    mcp.settings.transport_security = TransportSecuritySettings(
+    transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=False
     )
 
 except (ImportError, AttributeError):
-    pass
-
-
-mcp.settings.stateless_http = True
-mcp.settings.streamable_http_path = "/"
+    transport_security = None
 
 
 # IMPORTANT:
-# This is created AFTER the OAuth metadata patch above.
-mcp_http_app = mcp.streamable_http_app()
+# Explicitly pass streamable_http_path="/".
+#
+# Do NOT rely on the FastMCP settings value here.
+mcp_http_app = mcp.streamable_http_app(
+    streamable_http_path="/",
+    stateless_http=True,
+    transport_security=transport_security,
+)
 
 
-# ---------------------------------------------------------------------------
-# FPL OAuth login page
-# ---------------------------------------------------------------------------
+# ============================================================
+# PROTECTED RESOURCE METADATA
+#
+# Claude asks these URLs before OAuth registration:
+#
+# /.well-known/oauth-protected-resource
+#
+# /.well-known/oauth-protected-resource/mcp/<secret>
+#
+# They must resolve on the OUTER application because the
+# resource is the public MCP URL.
+# ============================================================
+
+def protected_resource_metadata():
+    return {
+        "resource": MCP_PUBLIC_URL,
+        "authorization_servers": [
+            OAUTH_ISSUER
+        ],
+        "scopes_supported": [
+            "read"
+        ],
+        "bearer_methods_supported": [
+            "header"
+        ],
+    }
+
+
+async def protected_resource_metadata_root(
+    _request,
+):
+    return JSONResponse(
+        protected_resource_metadata()
+    )
+
+
+async def protected_resource_metadata_mcp(
+    _request,
+):
+    return JSONResponse(
+        protected_resource_metadata()
+    )
+
+
+# ============================================================
+# FPL LOGIN PAGE
+# ============================================================
 
 LOGIN_PAGE = """
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-    <meta charset="utf-8">
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1"
-    >
 
-    <title>FPL Manager Login</title>
+<meta charset="utf-8">
 
-    <style>
-        body {
-            margin: 0;
-            min-height: 100vh;
-            display: grid;
-            place-items: center;
-            background: #e9ebe5;
-            font-family: system-ui, sans-serif;
-            color: #17211b;
-        }
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+>
 
-        main {
-            width: min(90%, 420px);
-            padding: 36px;
-            border-radius: 24px;
-            background: #f9f9f5;
-            box-shadow: 0 25px 70px rgba(0,0,0,.15);
-        }
+<title>FPL Manager Login</title>
 
-        h1 {
-            margin: 0 0 10px;
-            font-size: 32px;
-        }
+<style>
 
-        p {
-            color: #68726c;
-            line-height: 1.5;
-        }
+body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    background: #e9ebe5;
+    font-family: system-ui, sans-serif;
+    color: #17211b;
+}
 
-        label {
-            display: block;
-            margin-top: 18px;
-            color: #68726c;
-            font-size: 13px;
-        }
+main {
+    width: min(90%, 420px);
+    padding: 36px;
+    border-radius: 24px;
+    background: #f9f9f5;
+    box-shadow: 0 25px 70px rgba(0,0,0,.15);
+}
 
-        input {
-            width: 100%;
-            box-sizing: border-box;
-            margin-top: 7px;
-            padding: 13px;
-            border: 1px solid #ccd1ca;
-            border-radius: 10px;
-            font-size: 16px;
-        }
+h1 {
+    margin: 0 0 10px;
+    font-size: 32px;
+}
 
-        button {
-            width: 100%;
-            margin-top: 24px;
-            padding: 14px;
-            border: 0;
-            border-radius: 999px;
-            background: #17211b;
-            color: white;
-            font-size: 15px;
-            font-weight: 700;
-            cursor: pointer;
-        }
+p {
+    color: #68726c;
+    line-height: 1.5;
+}
 
-        .note {
-            margin-top: 20px;
-            font-size: 12px;
-            color: #68726c;
-        }
+label {
+    display: block;
+    margin-top: 18px;
+    color: #68726c;
+    font-size: 13px;
+}
 
-        .error {
-            padding: 12px;
-            border-radius: 10px;
-            background: #f6dfdc;
-            color: #8b332c;
-        }
-    </style>
+input {
+    width: 100%;
+    box-sizing: border-box;
+    margin-top: 7px;
+    padding: 13px;
+    border: 1px solid #ccd1ca;
+    border-radius: 10px;
+    font-size: 16px;
+}
+
+button {
+    width: 100%;
+    margin-top: 24px;
+    padding: 14px;
+    border: 0;
+    border-radius: 999px;
+    background: #17211b;
+    color: white;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.note {
+    margin-top: 20px;
+    font-size: 12px;
+    color: #68726c;
+}
+
+.error {
+    padding: 12px;
+    border-radius: 10px;
+    background: #f6dfdc;
+    color: #8b332c;
+}
+
+</style>
+
 </head>
 
 <body>
 
 <main>
 
-    <h1>Connect your FPL account</h1>
+<h1>Connect your FPL account</h1>
 
-    <p>
-        Sign in with your Fantasy Premier League credentials.
-        Your password is used only to authenticate with FPL.
-    </p>
+<p>
+Sign in with your Fantasy Premier League credentials.
+Your password is used only to authenticate with FPL.
+</p>
 
-    {error}
+{error}
 
-    <form method="post">
+<form method="post">
 
-        <label>
-            FPL email
+<label>
 
-            <input
-                type="email"
-                name="email"
-                autocomplete="username"
-                required
-            >
-        </label>
+FPL email
 
-        <label>
-            FPL password
+<input
+    type="email"
+    name="email"
+    autocomplete="username"
+    required
+>
 
-            <input
-                type="password"
-                name="password"
-                autocomplete="current-password"
-                required
-            >
-        </label>
+</label>
 
-        <button type="submit">
-            Connect FPL account
-        </button>
+<label>
 
-    </form>
+FPL password
 
-    <div class="note">
-        This login is being requested by your FPL Manager MCP connection.
-    </div>
+<input
+    type="password"
+    name="password"
+    autocomplete="current-password"
+    required
+>
+
+</label>
+
+<button type="submit">
+Connect FPL account
+</button>
+
+</form>
+
+<div class="note">
+This login is being requested by your FPL Manager
+MCP connection.
+</div>
 
 </main>
 
 </body>
+
 </html>
 """
 
 
-def login_error(message: str):
+def login_error(
+    message: str,
+):
     return HTMLResponse(
         LOGIN_PAGE.replace(
             "{error}",
@@ -304,10 +389,16 @@ def login_error(message: str):
     )
 
 
-async def oauth_login_page(request):
-    request_id = request.path_params["request_id"]
+async def oauth_login_page(
+    request,
+):
+    request_id = request.path_params[
+        "request_id"
+    ]
 
-    pending = oauth_provider.pending.get(request_id)
+    pending = oauth_provider.pending.get(
+        request_id
+    )
 
     if not pending:
         return HTMLResponse(
@@ -329,9 +420,13 @@ async def oauth_login_submit(
     email: str = Form(...),
     password: str = Form(...),
 ):
-    request_id = request.path_params["request_id"]
+    request_id = request.path_params[
+        "request_id"
+    ]
 
-    pending = oauth_provider.pending.get(request_id)
+    pending = oauth_provider.pending.get(
+        request_id
+    )
 
     if not pending:
         return HTMLResponse(
@@ -341,6 +436,7 @@ async def oauth_login_submit(
         )
 
     try:
+
         auth = FPLAutomation(
             email,
             password,
@@ -368,16 +464,21 @@ async def oauth_login_submit(
             client,
         )
 
-        mcp_tools._active_session_id = session_id
+        mcp_tools._active_session_id = (
+            session_id
+        )
 
-        redirect_uri = oauth_provider.complete_fpl_login(
-            request_id,
-            session_id,
+        redirect_uri = (
+            oauth_provider.complete_fpl_login(
+                request_id,
+                session_id,
+            )
         )
 
         if not redirect_uri:
             return login_error(
-                "OAuth request expired before authentication completed."
+                "OAuth request expired before "
+                "authentication completed."
             )
 
         return RedirectResponse(
@@ -386,16 +487,19 @@ async def oauth_login_submit(
         )
 
     except Exception as exc:
+
         return login_error(
             f"FPL authentication failed: {exc}"
         )
 
 
-# ---------------------------------------------------------------------------
-# Health endpoint
-# ---------------------------------------------------------------------------
+# ============================================================
+# HEALTH
+# ============================================================
 
-async def health(_request):
+async def health(
+    _request,
+):
     return JSONResponse(
         {
             "status": "ok",
@@ -404,14 +508,15 @@ async def health(_request):
     )
 
 
-# ---------------------------------------------------------------------------
-# MCP GET handling
+# ============================================================
+# MCP GET
 #
-# Streamable HTTP uses POST for MCP messages.
-# A GET request to this stateless endpoint is therefore explicitly rejected.
-# ---------------------------------------------------------------------------
+# Stateless Streamable HTTP clients use POST for MCP messages.
+# ============================================================
 
-async def mcp_get_not_supported(_request):
+async def mcp_get_not_supported(
+    _request,
+):
     return Response(
         status_code=405,
         headers={
@@ -420,12 +525,14 @@ async def mcp_get_not_supported(_request):
     )
 
 
-# ---------------------------------------------------------------------------
-# Application lifespan
-# ---------------------------------------------------------------------------
+# ============================================================
+# APPLICATION LIFESPAN
+# ============================================================
 
 @contextlib.asynccontextmanager
-async def lifespan(_app):
+async def lifespan(
+    _app,
+):
 
     async with contextlib.AsyncExitStack() as stack:
 
@@ -436,24 +543,34 @@ async def lifespan(_app):
         yield
 
 
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
+# ============================================================
+# ROUTES
+# ============================================================
 
 routes = [
 
+    # Health
     Route(
         "/health",
         health,
         methods=["GET"],
     ),
 
+    # Protected Resource Metadata - root fallback
     Route(
-        f"/mcp/{PATH_SECRET}",
-        mcp_get_not_supported,
+        "/.well-known/oauth-protected-resource",
+        protected_resource_metadata_root,
         methods=["GET"],
     ),
 
+    # Protected Resource Metadata - MCP path
+    Route(
+        f"/.well-known/oauth-protected-resource{MCP_PUBLIC_PATH}",
+        protected_resource_metadata_mcp,
+        methods=["GET"],
+    ),
+
+    # OAuth login UI
     Route(
         "/oauth/login/{request_id}",
         oauth_login_page,
@@ -466,11 +583,16 @@ routes = [
         methods=["POST"],
     ),
 
+    # MCP application.
+    #
+    # Because mcp_http_app uses streamable_http_path="/",
+    # the mounted URL itself is the MCP endpoint.
     Mount(
-        f"/mcp/{PATH_SECRET}",
+        MCP_PUBLIC_PATH,
         app=mcp_http_app,
     ),
 
+    # Existing web application
     Mount(
         "/",
         app=auth_app,
@@ -478,9 +600,9 @@ routes = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Starlette application
-# ---------------------------------------------------------------------------
+# ============================================================
+# STARLETTE APPLICATION
+# ============================================================
 
 app = Starlette(
     routes=routes,
@@ -488,9 +610,9 @@ app = Starlette(
 )
 
 
-# ---------------------------------------------------------------------------
-# Local execution
-# ---------------------------------------------------------------------------
+# ============================================================
+# LOCAL EXECUTION
+# ============================================================
 
 if __name__ == "__main__":
 
