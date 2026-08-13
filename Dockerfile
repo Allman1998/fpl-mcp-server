@@ -5,9 +5,18 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 
-RUN python -m pip install --no-cache-dir --upgrade "mcp>=1.0.0" \
-    && python -m pip install --no-cache-dir . \
-    && python -c "from mcp.server.fastmcp import FastMCP; print('FastMCP OK')"
+RUN python -m pip install --no-cache-dir "mcp>=1.0.0" \
+    "fastapi>=0.100.0" \
+    "uvicorn>=0.20.0" \
+    "httpx>=0.27.0" \
+    "playwright>=1.40.0" \
+    "pydantic>=2.0.0" \
+    "python-multipart>=0.0.9" \
+    "beautifulsoup4>=4.12.0"
+
+RUN python -m pip install --no-cache-dir --no-deps .
+
+RUN python -c "from mcp.server.fastmcp import FastMCP; print('FastMCP OK')"
 
 RUN playwright install chromium
 
