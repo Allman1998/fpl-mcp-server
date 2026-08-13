@@ -693,6 +693,11 @@ routes = [
         oauth_login_submit,
         methods=["POST"],
     ),
+    Route(
+        "/oauth/login/{request_id}/status",
+        oauth_login_status,
+        methods=["GET"],
+    ),
 
     # MCP application (path normalized by NormalizeMcpPathMiddleware)
     Mount(
