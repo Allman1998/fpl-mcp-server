@@ -1,6 +1,6 @@
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from mcp.server.fastmcp import FastMCP
 
@@ -111,6 +111,15 @@ async def _ensure_bootstrap(client) -> str | None:
         return None
     except Exception as exc:
         return f"Error: Failed to load FPL bootstrap data: {exc}"
+
+
+async def _ensure_fixtures(client) -> str | None:
+    """Load fixtures into the session store. Returns error string or None."""
+    try:
+        await store.ensure_fixtures_data(client)
+        return None
+    except Exception as exc:
+        return f"Error: Failed to load FPL fixtures data: {exc}"
 
 
 def _get_client():
@@ -570,11 +579,15 @@ async def get_current_gameweek() -> str:
         return "Error: Gameweek data not available after bootstrap load."
     
     try:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         
         for event in store.bootstrap_data.events:
             if event.is_current:
                 deadline = datetime.fromisoformat(event.deadline_time.replace('Z', '+00:00'))
+                if deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=timezone.utc)
+                if now.tzinfo is None:
+                    now = now.replace(tzinfo=timezone.utc)
                 if now < deadline:
                     return (
                         f"**Current Gameweek: {event.name}**\n"
@@ -1912,9 +1925,15 @@ async def get_fixtures_for_gameweek(gameweek: int) -> str:
     """
     client = _get_client()
     if not client: return "Error: Not authenticated. Please use login_to_fpl first."
-    
+
+    err = await _ensure_bootstrap(client)
+    if err:
+        return err
+    err = await _ensure_fixtures(client)
+    if err:
+        return err
     if not store.fixtures_data:
-        return "Error: Fixtures data not available."
+        return "Error: Fixtures data not available after load."
     
     try:
         gw_fixtures = [f for f in store.fixtures_data if f.event == gameweek]
@@ -1959,6 +1978,13 @@ async def analyze_team_fixtures(team_name: str, num_gameweeks: int = 5) -> str:
     """
     client = _get_client()
     if not client: return "Error: Not authenticated. Please use login_to_fpl first."
+
+    err = await _ensure_bootstrap(client)
+    if err:
+        return err
+    err = await _ensure_fixtures(client)
+    if err:
+        return err
     
     if not store.bootstrap_data or not store.fixtures_data:
         return "Error: Team or fixtures data not available."
