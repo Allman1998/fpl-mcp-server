@@ -252,20 +252,11 @@ async def protected_resource_metadata_mcp(
 LOGIN_PAGE = """
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-
 <meta charset="utf-8">
-
-<meta
-    name="viewport"
-    content="width=device-width, initial-scale=1"
->
-
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FPL Manager Login</title>
-
 <style>
-
 body {
     margin: 0;
     min-height: 100vh;
@@ -275,45 +266,35 @@ body {
     font-family: system-ui, sans-serif;
     color: #17211b;
 }
-
 main {
-    width: min(90%, 420px);
-    padding: 36px;
+    width: min(92%, 440px);
+    padding: 32px;
     border-radius: 24px;
     background: #f9f9f5;
     box-shadow: 0 25px 70px rgba(0,0,0,.15);
 }
-
-h1 {
-    margin: 0 0 10px;
-    font-size: 32px;
-}
-
-p {
-    color: #68726c;
-    line-height: 1.5;
-}
-
+h1 { margin: 0 0 8px; font-size: 28px; }
+p { color: #68726c; line-height: 1.5; margin: 0 0 16px; }
 label {
     display: block;
-    margin-top: 18px;
+    margin-top: 14px;
     color: #68726c;
     font-size: 13px;
 }
-
-input {
+input, textarea {
     width: 100%;
     box-sizing: border-box;
     margin-top: 7px;
     padding: 13px;
     border: 1px solid #ccd1ca;
     border-radius: 10px;
-    font-size: 16px;
+    font-size: 15px;
+    font-family: inherit;
 }
-
+textarea { min-height: 88px; resize: vertical; }
 button {
     width: 100%;
-    margin-top: 24px;
+    margin-top: 22px;
     padding: 14px;
     border: 0;
     border-radius: 999px;
@@ -323,75 +304,90 @@ button {
     font-weight: 700;
     cursor: pointer;
 }
-
 .note {
-    margin-top: 20px;
+    margin-top: 14px;
     font-size: 12px;
     color: #68726c;
+    line-height: 1.45;
 }
-
+.steps {
+    background: #eef1ea;
+    border-radius: 12px;
+    padding: 12px 14px;
+    font-size: 13px;
+    color: #3a433d;
+    line-height: 1.45;
+    margin: 12px 0 4px;
+}
+.steps ol { margin: 8px 0 0 18px; padding: 0; }
+.steps li { margin: 4px 0; }
 .error {
     padding: 12px;
     border-radius: 10px;
     background: #f6dfdc;
     color: #8b332c;
+    margin-bottom: 12px;
 }
-
+details {
+    margin-top: 18px;
+    color: #68726c;
+    font-size: 13px;
+}
+details summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: #17211b;
+}
+code {
+    font-size: 12px;
+    background: #e8ebe4;
+    padding: 1px 4px;
+    border-radius: 4px;
+}
 </style>
-
 </head>
-
 <body>
-
 <main>
-
 <h1>Connect your FPL account</h1>
-
-<p>
-Sign in with your Fantasy Premier League credentials.
-Your password is used only to authenticate with FPL.
-</p>
-
+<p>Use an access token from a logged-in browser. This is the reliable method on this server.</p>
 {error}
-
+<div class="steps">
+<strong>On a laptop (2 minutes)</strong>
+<ol>
+<li>Open <code>fantasy.premierleague.com</code> and log in</li>
+<li>Press <code>F12</code> → <strong>Network</strong> tab</li>
+<li>Refresh or open <strong>My Team</strong></li>
+<li>Click any <code>/api/</code> request</li>
+<li>Copy the <strong>Authorization</strong> header (<code>Bearer …</code>)</li>
+<li>Paste it below and connect</li>
+</ol>
+</div>
 <form method="post">
-
 <label>
-FPL email
+FPL access token
+<textarea name="token" autocomplete="off" placeholder="Bearer eyJhbGciOi..."></textarea>
+</label>
+<button type="submit">Connect FPL account</button>
+</form>
+<details>
+<summary>Alternative: email &amp; password (often fails on this server)</summary>
+<p class="note">Browser automation on the free host is slow and frequently times out. Prefer the token method above.</p>
+<label>FPL email
 <input type="email" name="email" autocomplete="username">
 </label>
-
-<label>
-FPL password
+<label>FPL password
 <input type="password" name="password" autocomplete="current-password">
 </label>
-
-<div class="note" style="margin-top:18px">
-Or paste an FPL access token (more reliable on this server).
-Log into fantasy.premierleague.com on your phone/computer, open DevTools → Network, call any API request, and copy the <code>Authorization</code> or <code>x-api-authorization</code> header value (starts with Bearer).
-</div>
-
-<label>
-FPL access token (optional)
-<input type="text" name="token" autocomplete="off" placeholder="Bearer eyJ...">
-</label>
-
-<button type="submit">
-Connect FPL account
-</button>
-
-</form>
-
+<p class="note">If you use password, leave the token field empty. Submit still uses the same button above — fill either token <em>or</em> email/password.</p>
+</details>
 <div class="note">
-This login is being requested by your FPL Manager MCP connection.
+This login is for your FPL Manager MCP connection. The token acts like a temporary session; do not share it publicly.
 </div>
-
 </main>
-
 </body>
-
 </html>
 """
+
 
 
 def login_error(
