@@ -6,7 +6,7 @@ import uvicorn
 from fastapi import Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 
 from mcp.server.auth.provider import ProviderTokenVerifier
@@ -21,7 +21,11 @@ from .state import store
 
 
 PORT = int(os.environ.get("PORT", "10000"))
-PATH_SECRET = os.environ.get("MCP_PATH_SECRET", "").strip().strip("/")
+
+PATH_SECRET = os.environ.get(
+    "MCP_PATH_SECRET",
+    "",
+).strip().strip("/")
 
 if not PATH_SECRET:
     raise RuntimeError("MCP_PATH_SECRET must be set")
@@ -37,18 +41,13 @@ OAUTH_ISSUER = f"{PUBLIC_BASE_URL}/mcp/{PATH_SECRET}"
 
 
 # ---------------------------------------------------------------------------
-# IMPORTANT:
-# The existing mcp_tools.py already creates the FastMCP object with OAuth
-# settings and a token verifier. It was missing the authorization-server
-# provider connection. The official MCP SDK only creates the OAuth routes
-# when this provider is supplied.
+# OAuth configuration
 # ---------------------------------------------------------------------------
 
 mcp._auth_server_provider = oauth_provider
 mcp._token_verifier = ProviderTokenVerifier(oauth_provider)
 
 
-# Enable Dynamic Client Registration for Claude.
 if mcp.settings.auth is not None:
     mcp.settings.auth.client_registration_options = (
         ClientRegistrationOptions(
@@ -58,15 +57,6 @@ if mcp.settings.auth is not None:
         )
     )
 
-
-# ---------------------------------------------------------------------------
-# The existing OAuth provider originally sends the browser to:
-#
-#   /login/<request_id>
-#
-# We deliberately redirect OAuth login requests to a dedicated OAuth login
-# page so the existing normal FPL login flow remains untouched.
-# ---------------------------------------------------------------------------
 
 _original_authorize = oauth_provider.authorize
 
@@ -108,7 +98,7 @@ mcp_http_app = mcp.streamable_http_app()
 
 
 # ---------------------------------------------------------------------------
-# OAuth login page
+# FPL OAuth login page
 # ---------------------------------------------------------------------------
 
 LOGIN_PAGE = """
@@ -118,6 +108,7 @@ LOGIN_PAGE = """
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>FPL Manager Login</title>
+
     <style>
         body {
             margin: 0;
@@ -303,8 +294,6 @@ async def oauth_login_submit(
             client,
         )
 
-        # Make the authenticated FPL session available to the existing
-        # read-only FPL tools.
         mcp_tools._active_session_id = session_id
 
         redirect_uri = oauth_provider.complete_fpl_login(
@@ -333,7 +322,29 @@ async def oauth_login_submit(
 # ---------------------------------------------------------------------------
 
 async def health(_request):
-    return JSONResponse({"status": "ok"})
+    return JSONResponse(
+        {
+            "status": "ok",
+            "mcp": "available",
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# MCP GET handling
+#
+# Streamable HTTP MCP uses POST for client messages.
+# A server that doesn't provide an SSE GET stream should return 405 rather
+# than 404 so MCP clients know that the endpoint exists.
+# ---------------------------------------------------------------------------
+
+async def mcp_get_not_supported(_request):
+    return Response(
+        status_code=405,
+        headers={
+            "Allow": "POST",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +371,12 @@ routes = [
         methods=["GET"],
     ),
 
-    # OAuth human login
+    Route(
+        f"/mcp/{PATH_SECRET}",
+        mcp_get_not_supported,
+        methods=["GET"],
+    ),
+
     Route(
         "/oauth/login/{request_id}",
         oauth_login_page,
@@ -373,13 +389,11 @@ routes = [
         methods=["POST"],
     ),
 
-    # MCP OAuth + MCP endpoint
     Mount(
         f"/mcp/{PATH_SECRET}",
         app=mcp_http_app,
     ),
 
-    # Existing FPL login/application routes remain available.
     Mount(
         "/",
         app=auth_app,
