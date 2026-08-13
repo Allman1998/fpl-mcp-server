@@ -3,7 +3,6 @@ import os
 import uuid
 
 import uvicorn
-from fastapi import Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse, Response
@@ -440,18 +439,10 @@ async def oauth_login_page(
     )
 
 
-async def oauth_login_submit(
-    request,
-    email: str = Form(...),
-    password: str = Form(...),
-):
-    request_id = request.path_params[
-        "request_id"
-    ]
+async def oauth_login_submit(request):
+    request_id = request.path_params["request_id"]
 
-    pending = oauth_provider.pending.get(
-        request_id
-    )
+    pending = oauth_provider.pending.get(request_id)
 
     if not pending:
         return HTMLResponse(
@@ -461,13 +452,27 @@ async def oauth_login_submit(
         )
 
     try:
+        form = await request.form()
+        email = (form.get("email") or "").strip()
+        password = form.get("password") or ""
+        if not email or not password:
+            return login_error("Email and password are required.")
 
         auth = FPLAutomation(
             email,
             password,
         )
 
-        token = await auth.login_and_get_token()
+        import asyncio
+        try:
+            token = await asyncio.wait_for(
+                auth.login_and_get_token(),
+                timeout=90.0,
+            )
+        except asyncio.TimeoutError:
+            return login_error(
+                "FPL login timed out. Please try again."
+            )
 
         if not token:
             return login_error(
