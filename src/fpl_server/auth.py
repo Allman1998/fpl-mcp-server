@@ -90,7 +90,14 @@ class FPLAutomation:
         async with async_playwright() as p:
             launch_options = _chromium_launch_options(p.chromium.executable_path)
             headless = _headless_browser_enabled()
-            browser_args = ["--no-sandbox"]
+            browser_args = [
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-extensions",
+                "--disable-background-networking",
+                "--single-process",
+            ]
             if not headless:
                 browser_args.extend(
                     [
@@ -129,7 +136,7 @@ class FPLAutomation:
             try:
                 logger.info(f"Navigating to {self.base_url}")
                 await page.goto(self.base_url)
-                await page.wait_for_load_state("networkidle")
+                await page.wait_for_load_state("domcontentloaded")
                 
                 # 2. Handle Cookie Banner (Robust)
                 try:
@@ -176,7 +183,7 @@ class FPLAutomation:
                 # This matches your working code which waits for networkidle here
                 logger.info("Waiting for login page navigation...")
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=15000)
+                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
                 except Exception:
                     logger.warning("Network idle timeout - continuing anyway...")
 

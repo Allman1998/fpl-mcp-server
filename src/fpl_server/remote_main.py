@@ -439,6 +439,53 @@ async def oauth_login_page(
     )
 
 
+
+async def oauth_login_status(request):
+    """Poll FPL login progress for the OAuth flow."""
+    request_id = request.path_params["request_id"]
+    pending = oauth_provider.pending.get(request_id)
+    if not pending:
+        # may have completed and been popped
+        return HTMLResponse(
+            "<h1>Login request expired</h1>"
+            "<p>Please reconnect the FPL Manager connector.</p>",
+            status_code=400,
+        )
+    status = getattr(pending, "login_status", None) or "pending"
+    if status == "pending":
+        return HTMLResponse(
+            """<!DOCTYPE html><html><head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="2">
+<title>Signing in…</title>
+<style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#e9ebe5;font-family:system-ui,sans-serif;color:#17211b}
+main{padding:36px;border-radius:24px;background:#f9f9f5;box-shadow:0 25px 70px rgba(0,0,0,.15);text-align:center}
+</style></head><body><main>
+<h1>Signing in to FPL…</h1>
+<p>This can take up to a minute. This page will update automatically.</p>
+</main></body></html>"""
+        )
+    if status == "failed":
+        msg = getattr(pending, "login_error", None) or "FPL authentication failed."
+        return login_error(msg)
+    if status == "success":
+        session_id = getattr(pending, "login_session_id", None)
+        if not session_id:
+            return login_error(
+                "OAuth request expired before authentication completed."
+            )
+        redirect_uri = oauth_provider.complete_fpl_login(
+            request_id, session_id
+        )
+        if redirect_uri:
+            return RedirectResponse(redirect_uri, status_code=302)
+        return login_error(
+            "OAuth request expired before authentication completed."
+        )
+    return login_error("Unexpected login state.")
+
+
 async def oauth_login_submit(request):
     request_id = request.path_params["request_id"]
 
@@ -458,66 +505,60 @@ async def oauth_login_submit(request):
         if not email or not password:
             return login_error("Email and password are required.")
 
-        auth = FPLAutomation(
-            email,
-            password,
-        )
+        # Mark pending login and run Playwright in the background so the
+        # HTTP response is not killed by Render's request timeout.
+        pending.login_status = "pending"
+        pending.login_error = None
+        pending.login_redirect = None
 
         import asyncio
-        try:
-            token = await asyncio.wait_for(
-                auth.login_and_get_token(),
-                timeout=90.0,
-            )
-        except asyncio.TimeoutError:
-            return login_error(
-                "FPL login timed out. Please try again."
-            )
 
-        if not token:
-            return login_error(
-                auth.failure_reason
-                or "FPL authentication failed."
-            )
+        async def _run_login():
+            try:
+                auth = FPLAutomation(email, password)
+                token = await asyncio.wait_for(
+                    auth.login_and_get_token(),
+                    timeout=90.0,
+                )
+                if not token:
+                    pending.login_status = "failed"
+                    pending.login_error = (
+                        auth.failure_reason
+                        or "FPL authentication failed."
+                    )
+                    return
 
-        session_id = str(uuid.uuid4())
+                session_id = str(uuid.uuid4())
+                client = FPLClient(store=store)
+                client.set_api_token(token)
+                await store.set_login_success(
+                    request_id, session_id, client
+                )
+                mcp_tools._active_session_id = session_id
+                # Defer complete_fpl_login until status page redirects,
+                # so pending remains available for polling.
+                pending.login_session_id = session_id
+                pending.login_status = "success"
+            except asyncio.TimeoutError:
+                pending.login_status = "failed"
+                pending.login_error = (
+                    "FPL login timed out. Please try again."
+                )
+            except Exception as exc:
+                pending.login_status = "failed"
+                pending.login_error = (
+                    f"FPL authentication failed: {exc}"
+                )
 
-        client = FPLClient(
-            store=store,
-        )
+        asyncio.create_task(_run_login())
 
-        client.set_api_token(token)
-
-        await store.set_login_success(
-            request_id,
-            session_id,
-            client,
-        )
-
-        mcp_tools._active_session_id = (
-            session_id
-        )
-
-        redirect_uri = (
-            oauth_provider.complete_fpl_login(
-                request_id,
-                session_id,
-            )
-        )
-
-        if not redirect_uri:
-            return login_error(
-                "OAuth request expired before "
-                "authentication completed."
-            )
-
+        # Redirect to status page (auto-refreshes until done)
         return RedirectResponse(
-            redirect_uri,
+            f"/oauth/login/{request_id}/status",
             status_code=302,
         )
 
     except Exception as exc:
-
         return login_error(
             f"FPL authentication failed: {exc}"
         )
