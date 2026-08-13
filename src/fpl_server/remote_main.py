@@ -167,14 +167,14 @@ except (ImportError, AttributeError):
 
 
 # IMPORTANT:
-# Explicitly pass streamable_http_path="/".
-#
-# Do NOT rely on the FastMCP settings value here.
-mcp_http_app = mcp.streamable_http_app(
-    streamable_http_path="/",
-    stateless_http=True,
-    transport_security=transport_security,
-)
+# In MCP 1.28.1 the streamable HTTP route is configured on FastMCP itself.
+# The mounted public URL is /mcp/<secret>, so the inner app must use "/".
+mcp.settings.streamable_http_path = "/"
+mcp.settings.stateless_http = True
+if transport_security is not None:
+    mcp.settings.transport_security = transport_security
+
+mcp_http_app = mcp.streamable_http_app()
 
 
 # ============================================================

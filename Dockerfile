@@ -6,7 +6,7 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 
 RUN python -m pip uninstall -y mcp || true
-RUN python -m pip install --no-cache-dir "mcp==1.25.0"
+RUN python -m pip install --no-cache-dir "mcp==1.28.1"
 RUN python -m pip install --no-cache-dir \
     "fastapi>=0.100.0" \
     "uvicorn>=0.20.0" \
@@ -18,7 +18,7 @@ RUN python -m pip install --no-cache-dir \
 
 RUN python -m pip install --no-cache-dir --no-deps .
 
-RUN python -c "from mcp.server.fastmcp import FastMCP; print('FASTmcp 1.25.0 OK')"
+RUN python -c "from mcp.server.fastmcp import FastMCP; print('FASTmcp 1.28.1 OK')"
 
 RUN playwright install chromium
 
