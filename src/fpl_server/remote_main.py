@@ -543,6 +543,31 @@ async def lifespan(
         yield
 
 
+
+# ============================================================
+# MCP PATH NORMALIZATION
+#
+# External clients call POST /mcp/<secret> (no trailing slash).
+# The FastMCP Streamable HTTP app registers Route("/") which
+# matches the remaining path "/" after a trailing-slash Mount.
+# This ASGI wrapper rewrites the path so both forms work.
+# ============================================================
+
+async def _mcp_root_asgi(scope, receive, send):
+    """Forward exact /mcp/<secret> requests into the MCP app as path=/."""
+    if scope["type"] != "http":
+        await mcp_http_app(scope, receive, send)
+        return
+
+    # Copy scope and force path to "/" so Route("/") inside mcp_http_app matches
+    new_scope = dict(scope)
+    new_scope["path"] = "/"
+    # root_path should reflect the public mount so relative links stay correct
+    root = scope.get("root_path", "") + MCP_PUBLIC_PATH
+    new_scope["root_path"] = root
+    await mcp_http_app(new_scope, receive, send)
+
+
 # ============================================================
 # ROUTES
 # ============================================================
@@ -587,9 +612,20 @@ routes = [
     #
     # Because mcp_http_app uses streamable_http_path="/",
     # the mounted URL itself is the MCP endpoint.
+    #
+    # Starlette Mount path matching + Route("/") inside the SDK app only
+    # reliably matches the trailing-slash form of the mount point. External
+    # MCP clients (and OAuth resource identifiers) use the non-trailing
+    # form. Serve both by mounting under the trailing-slash path and adding
+    # an explicit passthrough Route for the exact non-trailing path.
     Mount(
-        MCP_PUBLIC_PATH,
+        MCP_PUBLIC_PATH + "/",
         app=mcp_http_app,
+    ),
+    # Exact non-trailing path -> same MCP ASGI app (path rewritten to /)
+    Route(
+        MCP_PUBLIC_PATH,
+        endpoint=_mcp_root_asgi,
     ),
 
     # Existing web application
