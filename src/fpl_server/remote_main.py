@@ -9,6 +9,7 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 
+from mcp.server.auth import routes as mcp_auth_routes
 from mcp.server.auth.provider import ProviderTokenVerifier
 from mcp.server.auth.settings import ClientRegistrationOptions
 
@@ -19,6 +20,10 @@ from .auth import FPLAutomation
 from .client import FPLClient
 from .state import store
 
+
+# ---------------------------------------------------------------------------
+# Server configuration
+# ---------------------------------------------------------------------------
 
 PORT = int(os.environ.get("PORT", "10000"))
 
@@ -58,6 +63,51 @@ if mcp.settings.auth is not None:
     )
 
 
+# ---------------------------------------------------------------------------
+# MCP SDK 1.28.1 public-client compatibility
+#
+# MCP SDK 1.28.1 hard-codes:
+#
+#   client_secret_post
+#   client_secret_basic
+#
+# into OAuth discovery metadata.
+#
+# Claude uses a public OAuth client with PKCE and therefore needs:
+#
+#   none
+#
+# The SDK's registration implementation already supports "none".
+# We only correct the discovery metadata before FastMCP builds its routes.
+# ---------------------------------------------------------------------------
+
+_original_build_metadata = mcp_auth_routes.build_metadata
+
+
+def _build_metadata_with_public_client(*args, **kwargs):
+    metadata = _original_build_metadata(*args, **kwargs)
+
+    existing_methods = (
+        metadata.token_endpoint_auth_methods_supported
+        or []
+    )
+
+    if "none" not in existing_methods:
+        metadata.token_endpoint_auth_methods_supported = [
+            "none",
+            *existing_methods,
+        ]
+
+    return metadata
+
+
+mcp_auth_routes.build_metadata = _build_metadata_with_public_client
+
+
+# ---------------------------------------------------------------------------
+# Existing OAuth login redirect
+# ---------------------------------------------------------------------------
+
 _original_authorize = oauth_provider.authorize
 
 
@@ -86,6 +136,7 @@ try:
     mcp.settings.transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=False
     )
+
 except (ImportError, AttributeError):
     pass
 
@@ -94,6 +145,8 @@ mcp.settings.stateless_http = True
 mcp.settings.streamable_http_path = "/"
 
 
+# IMPORTANT:
+# This is created AFTER the OAuth metadata patch above.
 mcp_http_app = mcp.streamable_http_app()
 
 
@@ -106,7 +159,11 @@ LOGIN_PAGE = """
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1"
+    >
+
     <title>FPL Manager Login</title>
 
     <style>
@@ -184,7 +241,9 @@ LOGIN_PAGE = """
 </head>
 
 <body>
+
 <main>
+
     <h1>Connect your FPL account</h1>
 
     <p>
@@ -195,8 +254,10 @@ LOGIN_PAGE = """
     {error}
 
     <form method="post">
+
         <label>
             FPL email
+
             <input
                 type="email"
                 name="email"
@@ -207,6 +268,7 @@ LOGIN_PAGE = """
 
         <label>
             FPL password
+
             <input
                 type="password"
                 name="password"
@@ -218,12 +280,15 @@ LOGIN_PAGE = """
         <button type="submit">
             Connect FPL account
         </button>
+
     </form>
 
     <div class="note">
         This login is being requested by your FPL Manager MCP connection.
     </div>
+
 </main>
+
 </body>
 </html>
 """
@@ -252,7 +317,10 @@ async def oauth_login_page(request):
         )
 
     return HTMLResponse(
-        LOGIN_PAGE.replace("{error}", "")
+        LOGIN_PAGE.replace(
+            "{error}",
+            "",
+        )
     )
 
 
@@ -273,7 +341,10 @@ async def oauth_login_submit(
         )
 
     try:
-        auth = FPLAutomation(email, password)
+        auth = FPLAutomation(
+            email,
+            password,
+        )
 
         token = await auth.login_and_get_token()
 
@@ -285,7 +356,10 @@ async def oauth_login_submit(
 
         session_id = str(uuid.uuid4())
 
-        client = FPLClient(store=store)
+        client = FPLClient(
+            store=store,
+        )
+
         client.set_api_token(token)
 
         await store.set_login_success(
@@ -333,9 +407,8 @@ async def health(_request):
 # ---------------------------------------------------------------------------
 # MCP GET handling
 #
-# Streamable HTTP MCP uses POST for client messages.
-# A server that doesn't provide an SSE GET stream should return 405 rather
-# than 404 so MCP clients know that the endpoint exists.
+# Streamable HTTP uses POST for MCP messages.
+# A GET request to this stateless endpoint is therefore explicitly rejected.
 # ---------------------------------------------------------------------------
 
 async def mcp_get_not_supported(_request):
@@ -353,10 +426,13 @@ async def mcp_get_not_supported(_request):
 
 @contextlib.asynccontextmanager
 async def lifespan(_app):
+
     async with contextlib.AsyncExitStack() as stack:
+
         await stack.enter_async_context(
             mcp.session_manager.run()
         )
+
         yield
 
 
@@ -365,6 +441,7 @@ async def lifespan(_app):
 # ---------------------------------------------------------------------------
 
 routes = [
+
     Route(
         "/health",
         health,
@@ -401,13 +478,22 @@ routes = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Starlette application
+# ---------------------------------------------------------------------------
+
 app = Starlette(
     routes=routes,
     lifespan=lifespan,
 )
 
 
+# ---------------------------------------------------------------------------
+# Local execution
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
+
     uvicorn.run(
         app,
         host="0.0.0.0",
