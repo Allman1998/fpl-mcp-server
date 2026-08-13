@@ -9,10 +9,41 @@ from .rotowire_scraper import RotoWireLineupScraper
 from .state import store
 
 # Define the server
+from mcp.server.auth.provider import (
+    AccessToken,
+    ProviderTokenVerifier,
+)
+from mcp.server.auth.settings import AuthSettings
+from pydantic import AnyHttpUrl
+
+from .oauth import FPLOAuthProvider
+
+
+PUBLIC_BASE_URL = os.environ.get(
+    "PUBLIC_BASE_URL",
+    "https://fpl-mcp-server-kaol.onrender.com",
+).rstrip("/")
+
+PATH_SECRET = os.environ.get("MCP_PATH_SECRET", "").strip().strip("/")
+
+OAUTH_ISSUER = AnyHttpUrl(
+    f"{PUBLIC_BASE_URL}/mcp/{PATH_SECRET}"
+)
+
+oauth_provider = FPLOAuthProvider(
+    str(OAUTH_ISSUER)
+)
+
 mcp = FastMCP(
     "FPL Manager",
     host=os.environ.get("FPL_MCP_HOST", "127.0.0.1"),
     port=int(os.environ.get("FPL_MCP_PORT", "8021")),
+    token_verifier=ProviderTokenVerifier(oauth_provider),
+    auth=AuthSettings(
+        issuer_url=OAUTH_ISSUER,
+        resource_server_url=OAUTH_ISSUER,
+        required_scopes=["read"],
+    ),
 )
 BASE_URL = os.environ.get("FPL_AUTH_BASE_URL", "http://127.0.0.1:8020")
 
