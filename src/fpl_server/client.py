@@ -57,6 +57,9 @@ class FPLClient:
         response.raise_for_status()
         return response.json()
 
+    async def get_bootstrap_static(self):
+        return await self.get_bootstrap_data()
+
     async def get_bootstrap_data(self) -> Dict[str, Any]:
         """Fetch fresh bootstrap data from API"""
         return await self._request("GET", "bootstrap-static/")
@@ -170,15 +173,22 @@ class FPLClient:
                 players.append(player)
             return players
         
-        # Fallback to API if in-memory data not available
-        logger.warning("Bootstrap data not loaded, fetching from API")
+        # Load bootstrap into store then retry in-memory path
+        if self._store is not None:
+            await self._store.ensure_bootstrap_data(self)
+            if self._store.bootstrap_data:
+                return await self.get_players()
+        logger.warning("Bootstrap data not loaded, fetching from API (no store)")
         data = await self.get_bootstrap_data()
         teams = {t['id']: t['name'] for t in data['teams']}
         types = {t['id']: t['singular_name_short'] for t in data['element_types']}
-        
         players = []
         for p in data['elements']:
-            player = Player(**p)
+            filtered = {k: p[k] for k in (
+                'id', 'web_name', 'first_name', 'second_name', 'team',
+                'element_type', 'now_cost', 'form', 'points_per_game', 'news'
+            ) if k in p}
+            player = Player(**filtered)
             player.team_name = teams.get(player.team, "Unknown")
             player.position = types.get(player.element_type, "Unk")
             players.append(player)
@@ -194,11 +204,15 @@ class FPLClient:
             'FWD': [top 20 forwards]
         }
         """
-        if not self._store or not self._store.bootstrap_data:
-            logger.warning("Bootstrap data not available for top players")
+        if self._store is None:
+            logger.warning("No session store available for top players")
             return {'GKP': [], 'DEF': [], 'MID': [], 'FWD': []}
-        
+        if self._store.bootstrap_data is None:
+            await self._store.ensure_bootstrap_data(self)
         data = self._store.bootstrap_data
+        if data is None:
+            logger.warning("Bootstrap data still unavailable for top players")
+            return {'GKP': [], 'DEF': [], 'MID': [], 'FWD': []}
         teams = {t.id: t.name for t in data.teams}
         types = {t.id: t.singular_name_short for t in data.element_types}
         

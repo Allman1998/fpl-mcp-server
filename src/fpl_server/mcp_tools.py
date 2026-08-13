@@ -104,6 +104,15 @@ def _records_contract(value: object) -> dict:
     }
 
 
+async def _ensure_bootstrap(client) -> str | None:
+    """Load bootstrap into the session store. Returns error string or None."""
+    try:
+        await store.ensure_bootstrap_data(client)
+        return None
+    except Exception as exc:
+        return f"Error: Failed to load FPL bootstrap data: {exc}"
+
+
 def _get_client():
     """Internal helper to get the active client"""
     if not _active_session_id:
@@ -433,7 +442,10 @@ async def search_players(name_query: str) -> str:
     """
     client = _get_client()
     if not client: return "Error: Not authenticated. Please use login_to_fpl first."
-    
+
+    err = await _ensure_bootstrap(client)
+    if err:
+        return err
     players = await client.get_players()
     matches = [p for p in players if name_query.lower() in p.web_name.lower()]
     
@@ -452,7 +464,10 @@ async def get_top_players() -> str:
     """
     client = _get_client()
     if not client: return "Error: Not authenticated. Please use login_to_fpl first."
-    
+
+    err = await _ensure_bootstrap(client)
+    if err:
+        return err
     try:
         top_players = await client.get_top_players_by_position()
         
@@ -547,9 +562,12 @@ async def get_current_gameweek() -> str:
     """
     client = _get_client()
     if not client: return "Error: Not authenticated. Please use login_to_fpl first."
-    
+
+    err = await _ensure_bootstrap(client)
+    if err:
+        return err
     if not store.bootstrap_data or not store.bootstrap_data.events:
-        return "Error: Gameweek data not available."
+        return "Error: Gameweek data not available after bootstrap load."
     
     try:
         now = datetime.utcnow()
@@ -600,9 +618,12 @@ async def get_gameweek_info(gameweek_number: int) -> str:
     """
     client = _get_client()
     if not client: return "Error: Not authenticated. Please use login_to_fpl first."
-    
+
+    err = await _ensure_bootstrap(client)
+    if err:
+        return err
     if not store.bootstrap_data or not store.bootstrap_data.events:
-        return "Error: Gameweek data not available."
+        return "Error: Gameweek data not available after bootstrap load."
     
     try:
         event = next((e for e in store.bootstrap_data.events if e.id == gameweek_number), None)
@@ -971,9 +992,12 @@ async def list_all_gameweeks() -> str:
     """
     client = _get_client()
     if not client: return "Error: Not authenticated. Please use login_to_fpl first."
-    
+
+    err = await _ensure_bootstrap(client)
+    if err:
+        return err
     if not store.bootstrap_data or not store.bootstrap_data.events:
-        return "Error: Gameweek data not available."
+        return "Error: Gameweek data not available after bootstrap load."
     
     try:
         output = ["**All Gameweeks:**\n"]
