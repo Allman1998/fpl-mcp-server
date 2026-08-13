@@ -78,6 +78,78 @@ async def _visible_login_failure(page) -> str | None:
     return None
 
 
+
+async def _launch_browser(playwright):
+    """Launch local Chromium, or connect to Browserbase when configured."""
+    api_key = os.environ.get("BROWSERBASE_API_KEY", "").strip()
+    project_id = os.environ.get("BROWSERBASE_PROJECT_ID", "").strip()
+
+    if api_key:
+        import httpx
+
+        payload = {}
+        if project_id:
+            payload["projectId"] = project_id
+
+        logger.info("Creating Browserbase session for FPL login...")
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                "https://www.browserbase.com/v1/sessions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload or {},
+            )
+            if resp.status_code >= 400:
+                raise RuntimeError(
+                    f"Browserbase session failed ({resp.status_code}): {resp.text[:300]}"
+                )
+            data = resp.json()
+            connect_url = (
+                data.get("connectUrl")
+                or data.get("connect_url")
+                or data.get("wsUrl")
+                or data.get("ws_url")
+            )
+            if not connect_url:
+                raise RuntimeError(
+                    f"Browserbase response missing connect URL: {list(data.keys())}"
+                )
+
+        logger.info("Connecting Playwright to Browserbase session...")
+        browser = await playwright.chromium.connect_over_cdp(connect_url)
+        return browser, True  # remote
+
+    launch_options = _chromium_launch_options(playwright.chromium.executable_path)
+    headless = _headless_browser_enabled()
+    browser_args = [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-extensions",
+        "--disable-background-networking",
+    ]
+    if not headless:
+        browser_args.extend(
+            [
+                "--start-minimized",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+            ]
+        )
+    logger.info(
+        "Launching local FPL authentication browser in %s mode.",
+        "headless" if headless else "local graphical",
+    )
+    browser = await playwright.chromium.launch(
+        headless=headless,
+        args=browser_args,
+        **launch_options,
+    )
+    return browser, False  # local
+
+
 class FPLAutomation:
     def __init__(self, email: str, password: str):
         self.email = email
@@ -88,41 +160,20 @@ class FPLAutomation:
 
     async def login_and_get_token(self) -> Optional[str]:
         async with async_playwright() as p:
-            launch_options = _chromium_launch_options(p.chromium.executable_path)
-            headless = _headless_browser_enabled()
-            browser_args = [
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-extensions",
-                "--disable-background-networking",
-            ]
-            if not headless:
-                browser_args.extend(
-                    [
-                        "--start-minimized",
-                        "--disable-background-timer-throttling",
-                        "--disable-backgrounding-occluded-windows",
-                    ]
+            browser, is_remote = await _launch_browser(p)
+            # Browserbase CDP often already has a default context
+            if is_remote and browser.contexts:
+                context = browser.contexts[0]
+            else:
+                context = await browser.new_context(
+                    viewport={"width": 1280, "height": 800},
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/122.0.0.0 Safari/537.36"
+                    ),
+                    locale="en-GB",
                 )
-            logger.info(
-                "Launching the FPL authentication browser in %s mode.",
-                "headless" if headless else "local graphical",
-            )
-            browser = await p.chromium.launch(
-                headless=headless,
-                args=browser_args,
-                **launch_options,
-            )
-            context = await browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/122.0.0.0 Safari/537.36"
-                ),
-                locale="en-GB",
-            )
             await context.add_init_script(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
             )
