@@ -1,0 +1,19 @@
+[project]
+name = "minimal-mcp-server"
+version = "0.1.0"
+description = "Minimal remote MCP server template (Streamable HTTP)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp==1.28.1",
+    "uvicorn>=0.20.0",
+    "starlette>=0.37.0",
+    "httpx>=0.27.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/minimal_mcp"]
