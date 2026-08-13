@@ -79,7 +79,7 @@ class FPLOAuthProvider(
             token=access_token,
             client_id=client.client_id,
             scopes=authorization_code.scopes,
-            expires_at=now + expires_in,
+            expires_at=int(now + expires_in),
             resource=authorization_code.resource,
             subject=authorization_code.subject,
         )
@@ -88,7 +88,7 @@ class FPLOAuthProvider(
             token=refresh_token,
             client_id=client.client_id,
             scopes=authorization_code.scopes,
-            expires_at=now + 30 * 24 * 3600,
+            expires_at=int(now + 30 * 24 * 3600),
             subject=authorization_code.subject,
         )
 
@@ -127,7 +127,7 @@ class FPLOAuthProvider(
             token=access_token,
             client_id=client.client_id,
             scopes=granted_scopes,
-            expires_at=time.time() + expires_in,
+            expires_at=int(time.time() + expires_in),
             subject=refresh_token.subject,
         )
 
@@ -135,7 +135,7 @@ class FPLOAuthProvider(
             token=new_refresh,
             client_id=client.client_id,
             scopes=granted_scopes,
-            expires_at=time.time() + 30 * 24 * 3600,
+            expires_at=int(time.time() + 30 * 24 * 3600),
             subject=refresh_token.subject,
         )
 
@@ -175,7 +175,7 @@ class FPLOAuthProvider(
         self.codes[code] = AuthorizationCode(
             code=code,
             scopes=params.scopes or ["read"],
-            expires_at=time.time() + 600,
+            expires_at=int(time.time() + 600),
             client_id=pending.client.client_id,
             code_challenge=params.code_challenge,
             redirect_uri=params.redirect_uri,
