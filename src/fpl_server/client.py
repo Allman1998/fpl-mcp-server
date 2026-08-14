@@ -270,6 +270,22 @@ class FPLClient:
 
     async def execute_transfers(self, payload: TransferPayload) -> Dict[str, Any]:
         return await self._request("POST", "transfers/", payload.model_dump())
+
+    async def save_my_team(
+        self,
+        team_id: int,
+        picks: List[Dict[str, Any]],
+        chip: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Save starting XI, bench order, captaincy, and optional chip.
+        POST /api/my-team/{team_id}/
+        picks items: element, position, is_captain, is_vice_captain
+        (purchase_price/selling_price included when available from current team)
+        chip: e.g. '3xc', 'bboost', 'freehit', 'wildcard' or None to clear/not set
+        """
+        payload: Dict[str, Any] = {"picks": picks, "chip": chip}
+        return await self._request("POST", f"my-team/{team_id}/", data=payload)
         
     async def close(self):
         if self.session is not None:

@@ -497,6 +497,137 @@ async def get_top_players() -> str:
     except Exception as e:
         return f"Error: {str(e)}"
 
+
+def _resolve_squad_player(name: str, squad_elements: dict, player_id_map) -> tuple:
+    """Resolve a name to an element id that is already in the squad."""
+    matches = store.find_players_by_name(name, fuzzy=True)
+    if not matches:
+        return None, f"Player '{name}' not found."
+    for element, _score in matches:
+        pid = element.id
+        if pid in squad_elements:
+            return pid, ""
+    names = []
+    for el_id in squad_elements:
+        ed = player_id_map.get(el_id) if player_id_map else None
+        if ed is not None:
+            names.append(getattr(ed, "web_name", str(el_id)))
+        else:
+            names.append(str(el_id))
+    return None, f"'{name}' is not in your current squad. Squad includes: {', '.join(names)}"
+
+
+async def _build_picks_payload(
+    client,
+    entry_id: int,
+    starting_names=None,
+    bench_names=None,
+    captain_name=None,
+    vice_name=None,
+    chip=None,
+    keep_chip: bool = True,
+):
+    """Build full 15-pick payload from current team with optional overrides."""
+    err = await _ensure_bootstrap(client)
+    if err:
+        return None, None, err
+    my_team = await client.get_my_team(entry_id)
+    current = list(my_team.get("picks") or [])
+    if len(current) != 15:
+        return None, None, (
+            f"Expected 15 picks in squad, found {len(current)}. "
+            "Finish squad selection on the FPL site first."
+        )
+
+    squad_by_element = {p["element"]: p for p in current}
+    id_map = store.player_id_map or {}
+
+    ordered = sorted(current, key=lambda p: p["position"])
+
+    if starting_names is not None or bench_names is not None:
+        if not starting_names or not bench_names:
+            return None, None, "Provide both starting_names (11) and bench_names (4)."
+        if len(starting_names) != 11:
+            return None, None, f"starting_names must have 11 players, got {len(starting_names)}."
+        if len(bench_names) != 4:
+            return None, None, f"bench_names must have 4 players, got {len(bench_names)}."
+        all_names = list(starting_names) + list(bench_names)
+        resolved_ids = []
+        for n in all_names:
+            pid, e = _resolve_squad_player(n, squad_by_element, id_map)
+            if e:
+                return None, None, e
+            resolved_ids.append(pid)
+        if len(set(resolved_ids)) != 15:
+            return None, None, "Duplicate players in starting XI/bench list."
+        if set(resolved_ids) != set(squad_by_element.keys()):
+            return None, None, (
+                "Starting XI + bench must be exactly your current 15 squad players. "
+                "Use make_transfers first if you need different players."
+            )
+        ordered_ids = resolved_ids
+    else:
+        ordered_ids = [p["element"] for p in ordered]
+
+    cap_id = next((p["element"] for p in current if p.get("is_captain")), None)
+    vice_id = next((p["element"] for p in current if p.get("is_vice_captain")), None)
+    if captain_name:
+        cap_id, e = _resolve_squad_player(captain_name, squad_by_element, id_map)
+        if e:
+            return None, None, e
+    if vice_name:
+        vice_id, e = _resolve_squad_player(vice_name, squad_by_element, id_map)
+        if e:
+            return None, None, e
+    if cap_id is None or vice_id is None:
+        return None, None, "Captain and vice-captain are required."
+    if cap_id == vice_id:
+        return None, None, "Captain and vice-captain must be different players."
+    if cap_id not in ordered_ids[:11]:
+        return None, None, "Captain must be in the starting XI."
+    if vice_id not in ordered_ids[:11]:
+        return None, None, "Vice-captain must be in the starting XI."
+
+    picks_out = []
+    for pos, el_id in enumerate(ordered_ids, start=1):
+        src = squad_by_element[el_id]
+        item = {
+            "element": el_id,
+            "position": pos,
+            "is_captain": el_id == cap_id,
+            "is_vice_captain": el_id == vice_id,
+        }
+        if "purchase_price" in src:
+            item["purchase_price"] = src["purchase_price"]
+        if "selling_price" in src:
+            item["selling_price"] = src["selling_price"]
+        picks_out.append(item)
+
+    chip_val = None
+    if chip is not None:
+        if str(chip).lower() in ("none", "clear", ""):
+            chip_val = None
+        else:
+            mapping = {
+                "triple captain": "3xc",
+                "tc": "3xc",
+                "3xc": "3xc",
+                "bench boost": "bboost",
+                "bb": "bboost",
+                "bboost": "bboost",
+                "free hit": "freehit",
+                "fh": "freehit",
+                "freehit": "freehit",
+                "wildcard": "wildcard",
+                "wc": "wildcard",
+            }
+            chip_val = mapping.get(str(chip).lower(), str(chip).lower())
+    elif keep_chip:
+        chip_val = my_team.get("active_chip") or my_team.get("chip")
+
+    return picks_out, chip_val, None
+
+
 @mcp.tool()
 async def make_transfers(player_names_out: list[str], player_names_in: list[str]) -> str:
     """
@@ -561,6 +692,138 @@ async def make_transfers(player_names_out: list[str], player_names_in: list[str]
         return f"Success: {res}"
     except Exception as e:
         return f"Transfer failed: {str(e)}"
+
+
+
+@mcp.tool()
+async def set_lineup(
+    starting_names: list[str],
+    bench_names: list[str],
+    captain_name: str,
+    vice_captain_name: str,
+) -> str:
+    """
+    Set starting XI, bench order, captain and vice-captain for the authenticated team.
+    All 15 names must already be in your squad (use make_transfers to change players first).
+    starting_names: exactly 11 players in play order.
+    bench_names: exactly 4 players in bench order (first is first sub).
+    IRREVERSIBLE until you change it again. Only call when the user explicitly confirms.
+    """
+    client = _get_client()
+    if not client:
+        return "Error: Not authenticated. Please use login_to_fpl first."
+    entry_id = store.get_user_entry_id(client)
+    if not entry_id:
+        return "Error: Could not resolve your FPL entry id."
+    try:
+        picks, chip, err = await _build_picks_payload(
+            client,
+            entry_id,
+            starting_names=starting_names,
+            bench_names=bench_names,
+            captain_name=captain_name,
+            vice_name=vice_captain_name,
+            keep_chip=True,
+        )
+        if err:
+            return f"Error: {err}"
+        await client.save_my_team(entry_id, picks, chip=chip)
+        xi = ", ".join(starting_names)
+        bench = ", ".join(bench_names)
+        return (
+            f"Lineup saved.\n"
+            f"XI: {xi}\n"
+            f"Bench: {bench}\n"
+            f"Captain: {captain_name} | Vice: {vice_captain_name}"
+        )
+    except Exception as e:
+        return f"Error saving lineup: {e}"
+
+
+@mcp.tool()
+async def set_captain(captain_name: str, vice_captain_name: str) -> str:
+    """
+    Change captain and vice-captain only (keeps current XI and bench order).
+    Both must be in the current starting XI. Only call when the user explicitly confirms.
+    """
+    client = _get_client()
+    if not client:
+        return "Error: Not authenticated. Please use login_to_fpl first."
+    entry_id = store.get_user_entry_id(client)
+    if not entry_id:
+        return "Error: Could not resolve your FPL entry id."
+    try:
+        picks, chip, err = await _build_picks_payload(
+            client,
+            entry_id,
+            captain_name=captain_name,
+            vice_name=vice_captain_name,
+            keep_chip=True,
+        )
+        if err:
+            return f"Error: {err}"
+        await client.save_my_team(entry_id, picks, chip=chip)
+        return f"Captain set to {captain_name}, vice-captain set to {vice_captain_name}."
+    except Exception as e:
+        return f"Error setting captain: {e}"
+
+
+@mcp.tool()
+async def activate_chip(chip_name: str) -> str:
+    """
+    Activate an FPL chip for the current gameweek: wildcard, freehit, bboost (bench boost), or 3xc (triple captain).
+    Pass chip_name as one of: wildcard, freehit, bboost, 3xc (aliases like 'triple captain', 'bb' also accepted).
+    IRREVERSIBLE for the gameweek once the deadline passes. Only call when the user explicitly confirms.
+    """
+    client = _get_client()
+    if not client:
+        return "Error: Not authenticated. Please use login_to_fpl first."
+    entry_id = store.get_user_entry_id(client)
+    if not entry_id:
+        return "Error: Could not resolve your FPL entry id."
+    try:
+        picks, chip, err = await _build_picks_payload(
+            client,
+            entry_id,
+            chip=chip_name,
+            keep_chip=False,
+        )
+        if err:
+            return f"Error: {err}"
+        if not chip:
+            return "Error: Could not interpret chip name."
+        await client.save_my_team(entry_id, picks, chip=chip)
+        return f"Chip activated: {chip}. Verify in the FPL app."
+    except Exception as e:
+        return f"Error activating chip: {e}"
+
+
+@mcp.tool()
+async def clear_chip() -> str:
+    """
+    Clear any active chip selection for the current team save (before deadline).
+    Only call when the user explicitly confirms.
+    """
+    client = _get_client()
+    if not client:
+        return "Error: Not authenticated. Please use login_to_fpl first."
+    entry_id = store.get_user_entry_id(client)
+    if not entry_id:
+        return "Error: Could not resolve your FPL entry id."
+    try:
+        picks, _chip, err = await _build_picks_payload(
+            client,
+            entry_id,
+            chip="none",
+            keep_chip=False,
+        )
+        if err:
+            return f"Error: {err}"
+        await client.save_my_team(entry_id, picks, chip=None)
+        return "Active chip cleared (if FPL allowed it before deadline)."
+    except Exception as e:
+        return f"Error clearing chip: {e}"
+
 
 @mcp.tool()
 async def get_current_gameweek() -> str:
