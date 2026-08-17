@@ -44,17 +44,37 @@ class FPLClient:
     async def _request(self, method: str, endpoint: str, data: dict = None, params: dict = None) -> Any:
         url = f"{self.BASE_URL}{endpoint}"
         session = self._get_session()
-        headers = {}
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Origin": "https://fantasy.premierleague.com",
+            "Referer": "https://fantasy.premierleague.com/",
+        }
         if self.api_token:
-            headers['x-api-authorization'] = self.api_token
-            headers['Authorization'] = self.api_token
+            headers["x-api-authorization"] = self.api_token
+            headers["Authorization"] = self.api_token
 
         if method == "GET":
             response = await session.get(url, headers=headers, params=params)
         else:
+            # Transfer page referer helps some FPL checks
+            if endpoint.startswith("transfers"):
+                headers["Referer"] = "https://fantasy.premierleague.com/transfers"
             response = await session.post(url, json=data, headers=headers)
-        
-        response.raise_for_status()
+
+        if response.status_code >= 400:
+            body = response.text
+            try:
+                detail = response.json()
+                body = str(detail)
+            except Exception:
+                pass
+            raise httpx.HTTPStatusError(
+                f"FPL {response.status_code} on {endpoint}: {body[:800]}",
+                request=response.request,
+                response=response,
+            )
+        if response.status_code == 204 or not response.content:
+            return {}
         return response.json()
 
     async def get_bootstrap_static(self):
@@ -268,8 +288,26 @@ class FPLClient:
                 return event['id']
         return 38
 
-    async def execute_transfers(self, payload: TransferPayload) -> Dict[str, Any]:
-        return await self._request("POST", "transfers/", payload.model_dump())
+    async def execute_transfers(self, payload: dict) -> Dict[str, Any]:
+        """POST /api/transfers/. Accepts a raw dict matching FPL's expected body."""
+        return await self._request("POST", "transfers/", data=payload)
+
+    async def preview_and_confirm_transfers(self, payload: dict) -> Dict[str, Any]:
+        """
+        FPL transfer flow: POST with confirmed=False to validate, then confirmed=True to apply.
+        Returns the final response. Raises with FPL error body on failure.
+        """
+        preview = dict(payload)
+        preview["confirmed"] = False
+        # Preview may return errors in body with 200 or 400
+        try:
+            preview_res = await self._request("POST", "transfers/", data=preview)
+        except httpx.HTTPStatusError:
+            raise
+        # Apply
+        apply = dict(payload)
+        apply["confirmed"] = True
+        return await self._request("POST", "transfers/", data=apply)
 
     async def save_my_team(
         self,

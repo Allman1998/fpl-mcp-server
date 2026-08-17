@@ -631,68 +631,155 @@ async def _build_picks_payload(
 @mcp.tool()
 async def make_transfers(player_names_out: list[str], player_names_in: list[str]) -> str:
     """
-    Execute transfers using player names. IRREVERSIBLE.
-    Provide lists of player names to transfer out and in.
+    Execute transfers using player names. IRREVERSIBLE once confirmed with FPL.
+    Provide equal-length lists of players to transfer out and in.
     Example: player_names_out=["Salah"], player_names_in=["Haaland"]
+    Only call when the user explicitly confirms the exact transfer list.
     """
     client = _get_client()
-    if not client: return "Error: Not authenticated. Please use login_to_fpl first."
-    
+    if not client:
+        return "Error: Not authenticated. Please use login_to_fpl first."
     if len(player_names_out) != len(player_names_in):
         return "Error: Number of players out must match number of players in."
-    
+    if not player_names_out:
+        return "Error: Empty transfer list."
+
     try:
-        # Resolve player names to IDs
+        err = await _ensure_bootstrap(client)
+        if err:
+            return err
+
+        entry_id = store.get_user_entry_id(client)
+        if not entry_id:
+            return "Error: Could not determine your entry ID."
+
+        my_team = await client.get_my_team(entry_id)
+        picks = my_team.get("picks") or []
+        if len(picks) != 15:
+            return (
+                f"Error: Squad has {len(picks)} picks (need 15). "
+                "Finish initial squad selection on FPL before transferring."
+            )
+
+        transfers_info = my_team.get("transfers") or {}
+        bank = int(transfers_info.get("bank") or 0)
+
+        current_map = {}
+        for p in picks:
+            el = p.get("element")
+            if el is None:
+                continue
+            sp = p.get("selling_price")
+            if sp is None:
+                sp = p.get("purchase_price")
+            current_map[int(el)] = int(sp) if sp is not None else None
+
         ids_out = []
-        ids_in = []
-        
         for name in player_names_out:
             matches = store.find_players_by_name(name, fuzzy=True)
             if not matches:
                 return f"Error: Could not find player '{name}' to transfer out."
-            if len(matches) > 1 and matches[0][1] < 0.95:
-                return f"Error: Ambiguous player name '{name}'. Please be more specific."
-            ids_out.append(matches[0][0].id)
-        
+            owned = [m for m in matches if m[0].id in current_map]
+            if not owned:
+                return f"Error: You do not own '{name}' (or name did not match a squad player)."
+            ids_out.append(owned[0][0].id)
+
+        ids_in = []
         for name in player_names_in:
             matches = store.find_players_by_name(name, fuzzy=True)
             if not matches:
                 return f"Error: Could not find player '{name}' to transfer in."
-            if len(matches) > 1 and matches[0][1] < 0.95:
-                return f"Error: Ambiguous player name '{name}'. Please be more specific."
-            ids_in.append(matches[0][0].id)
-        
-        # Get entry ID
-        entry_id = store.get_user_entry_id(client)
-        if not entry_id:
-            return "Error: Could not determine your entry ID."
-        
-        # Execute transfers
-        gw = await client.get_current_gameweek()
-        my_team = await client.get_my_team(entry_id)
-        current_map = {p['element']: p['selling_price'] for p in my_team['picks']}
-        
-        all_players = await client.get_players()
-        cost_map = {p.id: p.now_cost for p in all_players}
-        
-        transfers = []
-        for i in range(len(ids_out)):
-            if ids_out[i] not in current_map:
-                player_name = store.get_player_name(ids_out[i])
-                return f"Error: You do not own {player_name}"
-            transfers.append({
-                "element_out": ids_out[i],
-                "element_in": ids_in[i],
-                "selling_price": current_map[ids_out[i]],
-                "purchase_price": cost_map[ids_in[i]]
-            })
-            
-        payload = TransferPayload(entry=entry_id, event=gw, transfers=transfers)
-        res = await client.execute_transfers(payload)
-        return f"Success: {res}"
-    except Exception as e:
-        return f"Transfer failed: {str(e)}"
+            chosen = None
+            for element, score in matches:
+                if element.id not in current_map and element.id not in ids_in:
+                    chosen = element
+                    break
+            if chosen is None:
+                return f"Error: '{name}' is already in your squad or could not be resolved uniquely."
+            ids_in.append(chosen.id)
 
+        if len(set(ids_out)) != len(ids_out):
+            return "Error: Duplicate players in transfer-out list."
+        if len(set(ids_in)) != len(ids_in):
+            return "Error: Duplicate players in transfer-in list."
+        if set(ids_out) & set(ids_in):
+            return "Error: A player cannot be in both out and in lists."
+
+        elements = {e.id: e for e in store.bootstrap_data.elements}
+        transfer_rows = []
+        budget_delta = 0
+        lines = []
+        for out_id, in_id in zip(ids_out, ids_in):
+            selling = current_map.get(out_id)
+            if selling is None and out_id in elements:
+                selling = int(elements[out_id].now_cost)
+            if selling is None:
+                return f"Error: Missing selling price for element {out_id}."
+            if in_id not in elements:
+                return f"Error: Player id {in_id} not in bootstrap data."
+            purchase = int(elements[in_id].now_cost)
+            budget_delta += int(selling) - purchase
+            out_name = elements[out_id].web_name if out_id in elements else str(out_id)
+            in_name = elements[in_id].web_name
+            lines.append(f"{out_name} (sell £{selling/10:.1f}) -> {in_name} (buy £{purchase/10:.1f})")
+            transfer_rows.append({
+                "element_out": int(out_id),
+                "element_in": int(in_id),
+                "selling_price": int(selling),
+                "purchase_price": int(purchase),
+            })
+
+        if bank + budget_delta < 0:
+            return (
+                f"Error: Not enough budget. Bank £{bank/10:.1f}m, "
+                f"net cost £{-budget_delta/10:.1f}m after these transfers."
+            )
+
+        gw = await client.get_current_gameweek()
+        payload = {
+            "confirmed": False,
+            "entry": int(entry_id),
+            "event": int(gw),
+            "transfers": transfer_rows,
+            "chip": None,
+            "wildcard": False,
+            "freehit": False,
+        }
+
+        try:
+            result = await client.preview_and_confirm_transfers(payload)
+        except Exception as e:
+            payload_alt = {
+                "confirmed": False,
+                "entry": int(entry_id),
+                "event": int(gw),
+                "transfers": transfer_rows,
+                "chip": None,
+            }
+            try:
+                await client.execute_transfers(payload_alt)
+                payload_alt["confirmed"] = True
+                result = await client.execute_transfers(payload_alt)
+            except Exception as e2:
+                attempted = "\n- ".join(lines)
+                return (
+                    "Transfer failed (validation).\nAttempted:\n- "
+                    + attempted
+                    + "\nFPL said: "
+                    + str(e2)
+                    + "\nFirst error: "
+                    + str(e)
+                    + "\nCommon causes: too many from one club, illegal positions after swaps, "
+                    "ambiguous player names, or session issue. Try one 1-for-1 with exact web_name."
+                )
+
+        return (
+            "Transfers confirmed by FPL.\n"
+            + "\n".join(f"* {ln}" for ln in lines)
+            + f"\nBank after (est.): £{(bank + budget_delta)/10:.1f}m"
+        )
+    except Exception as e:
+        return f"Transfer failed: {e}"
 
 
 @mcp.tool()
